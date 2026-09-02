@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "openvla_oft": {
+    "repository": "https://github.com/moojink/openvla-oft.git",
+    "base_commit": "e4287e94541f459edc4feabc4e181f537cd569a8",
+    "patch": "vendor/openvla-oft-piper.patch",
+    "patch_sha256": "b4008312226af0f1509bd81ccacd13b0306dc845ba767f5a666d8cb170f43e76",
+    "patched_files": [
+      "prismatic/vla/constants.py",
+      "prismatic/vla/datasets/rlds/oxe/configs.py",
+      "prismatic/vla/datasets/rlds/oxe/materialize.py",
+      "prismatic/vla/datasets/rlds/oxe/mixtures.py",
+      "prismatic/vla/datasets/rlds/oxe/transforms.py",
+      "pyproject.toml",
+      "vla-scripts/finetune.py"
+    ]
+  },
+  "vla_piper": {
+    "repository": "https://github.com/7-in-days/vla_pipeline.git",
+    "commit": "51e8c43e686ee7d9169cc1badb026c9286055b72"
+  },
+  "miniforge": {
+    "version": "26.3.2-2",
+    "url": "https://github.com/conda-forge/miniforge/releases/download/26.3.2-2/Miniforge3-26.3.2-2-Linux-x86_64.sh",
+    "sha256": "42260ffe3830fb953d5eee1bbb32229ff06aa7c3833c1ed7a9a0420a95685d94"
+  }
+}

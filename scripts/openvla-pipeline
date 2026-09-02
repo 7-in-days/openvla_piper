@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
+
+runtime_python() {
+  local runtime_prefix="${OPENVLA_CONDA_PREFIX:-}"
+  if [[ -z "${runtime_prefix}" && -r "${project_root}/.install-prefix" ]]; then
+    IFS= read -r runtime_prefix <"${project_root}/.install-prefix"
+  fi
+  [[ -n "${runtime_prefix}" && -x "${runtime_prefix}/bin/python" ]] || {
+    printf '%s\n' 'error=runtime_environment_missing hint=run_scripts/install_rtx4090.sh' >&2
+    exit 1
+  }
+  printf '%s' "${runtime_prefix}/bin/python"
+}
+
+# The Python logger uses one bounded worker. Cap native pools before Python
+# imports numerical libraries so launches cannot multiply conversion threads.
+set_bounded_env() {
+  local target_name="$1" override_name="$2" default_value="$3" max_value="$4"
+  local override_value="${!override_name-}"
+  local value="${override_value:-${default_value}}"
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]] || (( value > max_value )); then
+    printf 'error=invalid_env_limit name=%s value=%q allowed=1..%s\n' \
+      "${override_name}" "${value}" "${max_value}" >&2
+    exit 2
+  fi
+  printf -v "${target_name}" '%s' "${value}"
+  export "${target_name}"
+}
+set_bounded_env OMP_NUM_THREADS OPENVLA_OMP_NUM_THREADS 4 8
+set_bounded_env MKL_NUM_THREADS OPENVLA_MKL_NUM_THREADS 4 8
+set_bounded_env OPENBLAS_NUM_THREADS OPENVLA_OPENBLAS_NUM_THREADS 4 8
+set_bounded_env NUMEXPR_NUM_THREADS OPENVLA_NUMEXPR_NUM_THREADS 4 8
+set_bounded_env TF_NUM_INTRAOP_THREADS OPENVLA_TF_NUM_INTRAOP_THREADS 1 4
+set_bounded_env TF_NUM_INTEROP_THREADS OPENVLA_TF_NUM_INTEROP_THREADS 1 4
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export PIPER_OPENVLA_LOG_QUEUE_SIZE="${PIPER_OPENVLA_LOG_QUEUE_SIZE:-1024}"
+
+usage() {
+  cat <<'EOF'
+usage: scripts/openvla-pipeline COMMAND [options]
+
+commands:
+  show-config   print resolved user/config settings
+  plan          resolve launch settings without server, ROS, or GPU access
+  model-server  start only the OpenVLA HTTP model server
+  dry-run       sync inference; read observations, never publish robot actions
+  run-robot     sync inference with the three-part physical safety gate
+  smoke         run CPU-only synthetic contract tests
+
+checkpoint source: --checkpoint /local/dir or hf://OWNER/REPO@REVISION
+precedence: CLI > environment > JSON config > openvla_pipeline/user_settings.py
+EOF
+}
+
+command="${1:-help}"
+if (( $# > 0 )); then shift; fi
+case "${command}" in
+  show-config)
+    cd "${project_root}"
+    exec "$(runtime_python)" \
+      -m openvla_pipeline show-config "$@"
+    ;;
+  plan)
+    cd "${project_root}"
+    exec env DRY_RUN=1 "${project_root}/tools/run_piper_openvla_runtime.sh" sync "$@"
+    ;;
+  model-server)
+    exec "${project_root}/tools/run_piper_openvla_server.sh" "$@"
+    ;;
+  dry-run)
+    exec "${project_root}/tools/run_piper_openvla_runtime.sh" sync "$@" --mode dry-run
+    ;;
+  run-robot)
+    exec "${project_root}/tools/run_piper_openvla_runtime.sh" sync "$@" --mode live
+    ;;
+  smoke)
+    cd "${project_root}"
+    exec env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
+      "${OPENVLA_TEST_PYTHON:-python3}" tests/cpu_only_smoke.py
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    printf 'error=unknown_command value=%q\n' "${command}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

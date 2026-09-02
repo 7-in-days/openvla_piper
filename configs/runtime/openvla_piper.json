@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8777,
+    "checkpoint": null,
+    "base_model": null,
+    "openvla_oft_repo": null,
+    "auth_token_env": "PIPER_OPENVLA_SERVER_TOKEN",
+    "max_request_bytes": 8388608
+  },
+  "client": {
+    "model_server": "http://127.0.0.1:8777",
+    "rosbridge_url": "ws://localhost:9090",
+    "piper_repo": "~/vla-piper",
+    "task": "pick up the green blocks one at a time and place them in the white box",
+    "max_actions": 500,
+    "health_timeout_s": 30.0,
+    "request_timeout_s": 30.0,
+    "inference_log_root": "inference_logs",
+    "chunk_diagnostics": true
+  },
+  "safety": {
+    "allow_live_motion": false,
+    "gripper_min_m": 0.0,
+    "gripper_max_m": 0.085,
+    "max_arm_step_delta_rad": 1.5
+  }
+}

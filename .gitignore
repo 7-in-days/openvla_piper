@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+.install-prefix
+.install-prefix.*
+.lerobot-prefix
+.lerobot-prefix.*
+.openvla-oft-repo
+.openvla-oft-repo.*
+.piper-repo
+.piper-repo.*
+.runtime/
+artifacts/
+inference_logs/*
+!inference_logs/.gitkeep

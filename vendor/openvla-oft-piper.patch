@@ -1,0 +1,1024 @@
+diff --git a/prismatic/vla/constants.py b/prismatic/vla/constants.py
+index 229ae94..b438e14 100644
+--- a/prismatic/vla/constants.py
++++ b/prismatic/vla/constants.py
+@@ -1,9 +1,11 @@
+ """
+ Important constants for VLA training and evaluation.
+ 
+-Attempts to automatically identify the correct constants to set based on the Python command used to launch
+-training or evaluation. If it is unclear, defaults to using the LIBERO simulation benchmark constants.
++Uses an explicit ``ROBOT_PLATFORM`` environment variable when provided, otherwise attempts to identify the
++correct constants from the Python command used to launch training or evaluation. If it is unclear, defaults to
++using the LIBERO simulation benchmark constants.
+ """
++import os
+ import sys
+ from enum import Enum
+ 
+@@ -44,20 +46,58 @@ BRIDGE_CONSTANTS = {
+     "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS_Q99,
+ }
+ 
++def _piper_action_chunk():
++    raw_value = os.environ.get("PIPER_ACTION_CHUNK", "5")
++    try:
++        value = int(raw_value)
++    except ValueError as exc:
++        raise ValueError(
++            f"Invalid PIPER_ACTION_CHUNK={raw_value!r}; expected a positive integer"
++        ) from exc
++    if value <= 0:
++        raise ValueError(
++            f"Invalid PIPER_ACTION_CHUNK={raw_value!r}; expected a positive integer"
++        )
++    return value
++
++
++PIPER_CONSTANTS = {
++    # Default 5 preserves existing Piper checkpoints. New training wrappers set
++    # PIPER_ACTION_CHUNK explicitly so different horizons cannot silently resume
++    # one another.
++    "NUM_ACTIONS_CHUNK": _piper_action_chunk(),
++    "ACTION_DIM": 7,
++    "PROPRIO_DIM": 7,
++    # Piper commands absolute joint/gripper targets. Preserve the full demonstrated
++    # range; quantile clipping can make valid tail poses unreachable at inference.
++    "ACTION_PROPRIO_NORMALIZATION_TYPE": NormalizationType.BOUNDS,
++}
+ 
+-# Function to detect robot platform from command line arguments
++SUPPORTED_ROBOT_PLATFORMS = ("LIBERO", "ALOHA", "BRIDGE", "PIPER")
++
++
++# Prefer an explicit environment contract; retain command-line detection for upstream compatibility.
+ def detect_robot_platform():
++    explicit_platform = os.environ.get("ROBOT_PLATFORM")
++    if explicit_platform is not None:
++        platform = explicit_platform.strip().upper()
++        if platform not in SUPPORTED_ROBOT_PLATFORMS:
++            supported = ", ".join(SUPPORTED_ROBOT_PLATFORMS)
++            raise ValueError(f"Invalid ROBOT_PLATFORM={explicit_platform!r}; expected one of: {supported}")
++        return platform
++
+     cmd_args = " ".join(sys.argv).lower()
++    detected = [platform for platform in SUPPORTED_ROBOT_PLATFORMS if platform.lower() in cmd_args]
++    if len(detected) > 1:
++        raise ValueError(
++            f"Ambiguous robot platform in command line: {detected}. "
++            "Set ROBOT_PLATFORM explicitly to LIBERO, ALOHA, BRIDGE, or PIPER."
++        )
++    if detected:
++        return detected[0]
+ 
+-    if "libero" in cmd_args:
+-        return "LIBERO"
+-    elif "aloha" in cmd_args:
+-        return "ALOHA"
+-    elif "bridge" in cmd_args:
+-        return "BRIDGE"
+-    else:
+-        # Default to LIBERO if unclear
+-        return "LIBERO"
++    # Preserve the upstream default for generic LIBERO inference scripts.
++    return "LIBERO"
+ 
+ 
+ # Determine which robot platform to use
+@@ -70,6 +110,8 @@ elif ROBOT_PLATFORM == "ALOHA":
+     constants = ALOHA_CONSTANTS
+ elif ROBOT_PLATFORM == "BRIDGE":
+     constants = BRIDGE_CONSTANTS
++elif ROBOT_PLATFORM == "PIPER":
++    constants = PIPER_CONSTANTS
+ 
+ # Assign constants to global variables
+ NUM_ACTIONS_CHUNK = constants["NUM_ACTIONS_CHUNK"]
+diff --git a/prismatic/vla/datasets/rlds/oxe/configs.py b/prismatic/vla/datasets/rlds/oxe/configs.py
+index 3222e02..72ac352 100644
+--- a/prismatic/vla/datasets/rlds/oxe/configs.py
++++ b/prismatic/vla/datasets/rlds/oxe/configs.py
+@@ -37,6 +37,7 @@ class StateEncoding(IntEnum):
+     POS_QUAT = 2            # EEF XYZ (3) + Quaternion (4) + Gripper Open/Close (1)
+     JOINT = 3               # Joint Angles (7, <PAD> if fewer) + Gripper Open/Close (1)
+     JOINT_BIMANUAL = 4      # Joint Angles (2 x [ Joint Angles (6) + Gripper Open/Close (1) ])
++    JOINT_SINGLE_ARM = 5    # Joint Angles (6) + Gripper Position (1)
+     # fmt: on
+ 
+ 
+@@ -47,6 +48,7 @@ class ActionEncoding(IntEnum):
+     JOINT_POS = 2           # Joint Delta Position (7) + Gripper Open/Close (1)
+     JOINT_POS_BIMANUAL = 3  # Joint Delta Position (2 x [ Joint Delta Position (6) + Gripper Open/Close (1) ])
+     EEF_R6 = 4              # EEF Delta XYZ (3) + R6 (6) + Gripper Open/Close (1)
++    JOINT_POS_ABSOLUTE = 5  # Joint Absolute Position (6) + Gripper Position (1)
+     # fmt: on
+ 
+ 
+@@ -677,6 +679,14 @@ OXE_DATASET_CONFIGS = {
+         "state_encoding": StateEncoding.POS_EULER,
+         "action_encoding": ActionEncoding.EEF_POS,
+     },
++    ### Piper fine-tuning dataset converted from LeRobot v3 with Any4LeRobot
++    "piper_bridge": {
++        "image_obs_keys": {"primary": "third_person", "secondary": None, "wrist": "wrist"},
++        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
++        "state_obs_keys": ["state"],
++        "state_encoding": StateEncoding.JOINT_SINGLE_ARM,
++        "action_encoding": ActionEncoding.JOINT_POS_ABSOLUTE,
++    },
+     ### ALOHA fine-tuning datasets
+     "aloha1_fold_shorts_20_demos": {
+         "image_obs_keys": {"primary": "image", "secondary": None, "left_wrist": "left_wrist_image", "right_wrist": "right_wrist_image"},
+diff --git a/prismatic/vla/datasets/rlds/oxe/materialize.py b/prismatic/vla/datasets/rlds/oxe/materialize.py
+index fd4103d..0f014a7 100644
+--- a/prismatic/vla/datasets/rlds/oxe/materialize.py
++++ b/prismatic/vla/datasets/rlds/oxe/materialize.py
+@@ -29,8 +29,16 @@ def make_oxe_dataset_kwargs(
+ ) -> Dict[str, Any]:
+     """Generates config (kwargs) for given dataset from Open-X Embodiment."""
+     dataset_kwargs = deepcopy(OXE_DATASET_CONFIGS[dataset_name])
+-    if dataset_kwargs["action_encoding"] not in [ActionEncoding.EEF_POS, ActionEncoding.EEF_R6, ActionEncoding.JOINT_POS_BIMANUAL]:
+-        raise ValueError(f"Cannot load `{dataset_name}`; only EEF_POS & EEF_R6 & JOINT_POS_BIMANUAL actions supported!")
++    if dataset_kwargs["action_encoding"] not in [
++        ActionEncoding.EEF_POS,
++        ActionEncoding.EEF_R6,
++        ActionEncoding.JOINT_POS_ABSOLUTE,
++        ActionEncoding.JOINT_POS_BIMANUAL,
++    ]:
++        raise ValueError(
++            f"Cannot load `{dataset_name}`; only EEF_POS, EEF_R6, JOINT_POS_ABSOLUTE, and "
++            "JOINT_POS_BIMANUAL actions are supported!"
++        )
+ 
+     # [Contract] For EEF_POS & EEF_R6 actions, only the last action dimension (gripper) is absolute!
+     # Normalize all action dimensions *except* the gripper
+@@ -40,6 +48,9 @@ def make_oxe_dataset_kwargs(
+     elif dataset_kwargs["action_encoding"] is ActionEncoding.EEF_R6:
+         dataset_kwargs["absolute_action_mask"] = [False] * 9 + [True]
+         dataset_kwargs["action_normalization_mask"] = [True] * 9 + [False]
++    elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_ABSOLUTE:
++        dataset_kwargs["absolute_action_mask"] = [True] * ACTION_DIM
++        dataset_kwargs["action_normalization_mask"] = [True] * ACTION_DIM
+     elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL:
+         dataset_kwargs["absolute_action_mask"] = [True] * 14
+         dataset_kwargs["action_normalization_mask"] = [True] * 14
+diff --git a/prismatic/vla/datasets/rlds/oxe/mixtures.py b/prismatic/vla/datasets/rlds/oxe/mixtures.py
+index c5a2862..ae9ab38 100644
+--- a/prismatic/vla/datasets/rlds/oxe/mixtures.py
++++ b/prismatic/vla/datasets/rlds/oxe/mixtures.py
+@@ -9,6 +9,11 @@ from typing import Dict, List, Tuple
+ 
+ # fmt: off
+ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
++    # === Piper single-arm dataset converted from LeRobot v3 ===
++    "piper": [
++        ("piper_bridge", 1.0),
++    ],
++
+     # === Bridge V2 Dataset ===
+     "bridge": [
+         # ("bridge_oxe", 1.0),                                    # Version of Bridge V2 in Open-X GCP Bucket
+diff --git a/prismatic/vla/datasets/rlds/oxe/transforms.py b/prismatic/vla/datasets/rlds/oxe/transforms.py
+index bf848e9..43136bd 100644
+--- a/prismatic/vla/datasets/rlds/oxe/transforms.py
++++ b/prismatic/vla/datasets/rlds/oxe/transforms.py
+@@ -846,6 +846,15 @@ def aloha_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+     return trajectory
+ 
+ 
++def piper_bridge_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
++    """Validate the native Piper 7D absolute-joint schema emitted by Any4LeRobot."""
++    trajectory["action"] = tf.ensure_shape(tf.cast(trajectory["action"], tf.float32), [None, 7])
++    trajectory["observation"]["state"] = tf.ensure_shape(
++        tf.cast(trajectory["observation"]["state"], tf.float32), [None, 7]
++    )
++    return trajectory
++
++
+ # === Registry ===
+ OXE_STANDARDIZATION_TRANSFORMS = {
+     "bridge_oxe": bridge_oxe_dataset_transform,
+@@ -925,6 +934,8 @@ OXE_STANDARDIZATION_TRANSFORMS = {
+     "libero_goal_no_noops": libero_dataset_transform,
+     "libero_10_no_noops": libero_dataset_transform,
+     "libero_4_task_suites_no_noops": libero_dataset_transform,
++    ### Piper fine-tuning dataset
++    "piper_bridge": piper_bridge_dataset_transform,
+     ### ALOHA fine-tuning datasets
+     "aloha1_fold_shorts_20_demos": aloha_dataset_transform,
+     "aloha1_fold_shirt_30_demos": aloha_dataset_transform,
+diff --git a/pyproject.toml b/pyproject.toml
+index 6f027fe..d368837 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -44,15 +44,16 @@ dependencies = [
+     "sentencepiece==0.1.99",
+     "timm==0.9.10",
+     "tokenizers==0.19.1",
+-    "torch==2.2.0",
+-    "torchvision==0.17.0",
+-    "torchaudio==2.2.0",
+-    "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",  # IMPORTANT: Use this fork for bidirectional attn (for parallel decoding)
++    "torch==2.7.1",
++    "torchvision==0.22.1",
++    "torchaudio==2.7.1",
++    "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git@bc339d9ad707454c0c115970db43c260067c61ab",  # IMPORTANT: Use this fork for bidirectional attn (for parallel decoding)
+     "wandb",
+     "tensorflow==2.15.0",
+     "tensorflow_datasets==4.9.3",
++    "tensorflow-metadata==1.17.3",
+     "tensorflow_graphics==2021.12.3",
+-    "dlimp @ git+https://github.com/moojink/dlimp_openvla",
++    "dlimp @ git+https://github.com/moojink/dlimp_openvla@040105d256bd28866cc6620621a3d5f7b6b91b46",
+     "diffusers==0.30.3",
+     "imageio",
+     "uvicorn",
+diff --git a/vla-scripts/finetune.py b/vla-scripts/finetune.py
+index 940e485..2f0fc35 100644
+--- a/vla-scripts/finetune.py
++++ b/vla-scripts/finetune.py
+@@ -4,14 +4,22 @@ finetune.py
+ Fine-tunes OpenVLA via LoRA.
+ """
+ 
++import gc
++import hashlib
++import json
++import math
+ import os
++import random
++import shutil
+ import time
++import uuid
+ from collections import deque
+ from dataclasses import dataclass
+ from pathlib import Path
+-from typing import Dict, Optional, Tuple, Type
++from typing import Any, Dict, Optional, Tuple, Type
+ 
+ import draccus
++import numpy as np
+ import torch
+ import torch.distributed as dist
+ import torch.nn as nn
+@@ -73,6 +81,9 @@ class FinetuneConfig:
+     # Dataset
+     data_root_dir: Path = Path("datasets/rlds")      # Directory containing RLDS datasets
+     dataset_name: str = "aloha_scoop_x_into_bowl"    # Name of fine-tuning dataset (e.g., `aloha_scoop_x_into_bowl`)
++    control_hz: Optional[float] = None               # Dataset action rate; saved for deployment cadence validation
++    robot_contract_path: Optional[Path] = None       # JSON contract for names, units, action encoding, and cameras
++    source_schema_path: Optional[Path] = None        # LeRobot info.json used to bind the checkpoint to source schema
+     run_root_dir: Path = Path("runs")                # Path to directory to store logs & checkpoints
+     shuffle_buffer_size: int = 100_000               # Dataloader shuffle buffer size (can reduce if OOM errors occur)
+ 
+@@ -87,7 +98,7 @@ class FinetuneConfig:
+     # Training configuration
+     batch_size: int = 8                              # Batch size per device (total batch size = batch_size * num GPUs)
+     learning_rate: float = 5e-4                      # Learning rate
+-    lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 10% to 100%)
++    lr_warmup_steps: int = 0                         # Number of steps to warm up learning rate (from 0.1x to 1.0x)
+     num_steps_before_decay: int = 100_000            # Number of steps before LR decays by 10x
+     grad_accumulation_steps: int = 1                 # Number of gradient accumulation steps
+     max_steps: int = 200_000                         # Max number of training steps
+@@ -95,16 +106,18 @@ class FinetuneConfig:
+     val_freq: int = 10_000                           # (When `use_val_set==True`) Validation set logging frequency in steps
+     val_time_limit: int = 180                        # (When `use_val_set==True`) Time limit for computing validation metrics
+     save_freq: int = 10_000                          # Checkpoint saving frequency in steps
+-    save_latest_checkpoint_only: bool = False        # If True, saves only 1 checkpoint, overwriting latest checkpoint
+-                                                     #   (If False, saves all checkpoints)
++    save_latest_checkpoint_only: bool = False        # If True, commits new checkpoint then removes older checkpoints
++                                                     #   (If False, keeps all atomic step checkpoints)
+     resume: bool = False                             # If True, resumes from checkpoint
+     resume_step: Optional[int] = None                # (When `resume==True`) Step number that we are resuming from
++    resume_checkpoint_dir: Optional[Path] = None     # Atomic checkpoint dir or run dir containing latest_checkpoint.json
+     image_aug: bool = True                           # If True, trains with image augmentations (HIGHLY RECOMMENDED)
+     diffusion_sample_freq: int = 50                  # (When `use_diffusion==True`) Frequency for sampling in steps
+ 
+     # LoRA
+     use_lora: bool = True                            # If True, uses LoRA fine-tuning
+     lora_rank: int = 32                              # Rank of LoRA weight matrix
++    lora_alpha: Optional[int] = None                 # LoRA scaling numerator; None uses min(rank, 16)
+     lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
+     merge_lora_during_training: bool = True          # If True, merges LoRA weights and saves result during training
+                                                      #   Note: Merging can be very slow on some machines. If so, set to
+@@ -120,6 +133,266 @@ class FinetuneConfig:
+     # fmt: on
+ 
+ 
++def get_optimizer_update_step(
++    batch_idx: int,
++    grad_accumulation_steps: int,
++    initial_step: int = 0,
++) -> Optional[int]:
++    """Return the 1-based completed optimizer step at an accumulation boundary."""
++    if batch_idx < 0:
++        raise ValueError("batch_idx must be non-negative")
++    if grad_accumulation_steps < 1:
++        raise ValueError("grad_accumulation_steps must be positive")
++    if initial_step < 0:
++        raise ValueError("initial_step must be non-negative")
++
++    completed_micro_batches = batch_idx + 1
++    if completed_micro_batches % grad_accumulation_steps != 0:
++        return None
++    return initial_step + completed_micro_batches // grad_accumulation_steps
++
++
++def should_save_checkpoint(update_step: int, save_freq: int, max_steps: int) -> bool:
++    """Save periodic checkpoints and always commit the requested final optimizer step."""
++    if update_step < 1:
++        raise ValueError("update_step must be positive")
++    if save_freq < 1:
++        raise ValueError("save_freq must be positive")
++    if max_steps < 1:
++        raise ValueError("max_steps must be positive")
++    return update_step % save_freq == 0 or update_step >= max_steps
++
++
++ATOMIC_CHECKPOINT_FORMAT_VERSION = 1
++ATOMIC_CHECKPOINTS_DIRNAME = "checkpoints"
++LATEST_CHECKPOINT_POINTER = "latest_checkpoint.json"
++CHECKPOINT_METADATA_FILENAME = "checkpoint_metadata.json"
++TRAINER_STATE_FILENAME = "trainer_state.pt"
++
++
++def _fsync_directory(path: Path) -> None:
++    """Flush a directory entry after an atomic rename."""
++    directory_fd = os.open(path, os.O_RDONLY)
++    try:
++        os.fsync(directory_fd)
++    finally:
++        os.close(directory_fd)
++
++
++def _fsync_tree(path: Path) -> None:
++    """Flush every checkpoint file before publishing its directory."""
++    directories = [path]
++    for child in path.rglob("*"):
++        if child.is_file():
++            with child.open("rb") as stream:
++                os.fsync(stream.fileno())
++        elif child.is_dir():
++            directories.append(child)
++    for directory in reversed(directories):
++        _fsync_directory(directory)
++
++
++def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
++    """Write JSON through a temporary sibling and atomically replace the destination."""
++    path.parent.mkdir(parents=True, exist_ok=True)
++    temporary_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
++    try:
++        with temporary_path.open("w", encoding="utf-8") as stream:
++            json.dump(payload, stream, indent=2, sort_keys=True)
++            stream.write("\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary_path, path)
++        _fsync_directory(path.parent)
++    finally:
++        temporary_path.unlink(missing_ok=True)
++
++
++def get_checkpoint_step_dir(run_dir: Path, step: int) -> Path:
++    """Return the immutable directory for one completed optimizer step."""
++    if step < 0:
++        raise ValueError("checkpoint step must be non-negative")
++    return run_dir / ATOMIC_CHECKPOINTS_DIRNAME / f"step-{step:09d}"
++
++
++def resolve_resume_checkpoint(path: Path, requested_step: Optional[int] = None) -> Path:
++    """Resolve a direct atomic checkpoint or the latest pointer in a run directory."""
++    path = path.expanduser().resolve()
++    if (path / CHECKPOINT_METADATA_FILENAME).is_file() and (path / TRAINER_STATE_FILENAME).is_file():
++        checkpoint_dir = path
++    elif requested_step is not None and (path / ATOMIC_CHECKPOINTS_DIRNAME).is_dir():
++        checkpoint_dir = get_checkpoint_step_dir(path, requested_step)
++    else:
++        pointer_path = path / LATEST_CHECKPOINT_POINTER
++        if not pointer_path.is_file():
++            raise FileNotFoundError(
++                f"No atomic checkpoint or {LATEST_CHECKPOINT_POINTER} found under {path}"
++            )
++        with pointer_path.open("r", encoding="utf-8") as stream:
++            pointer = json.load(stream)
++        if pointer.get("format_version") != ATOMIC_CHECKPOINT_FORMAT_VERSION:
++            raise ValueError(f"Unsupported latest checkpoint pointer: {pointer_path}")
++        relative_checkpoint = Path(pointer["checkpoint"])
++        if relative_checkpoint.is_absolute() or ".." in relative_checkpoint.parts:
++            raise ValueError(f"Unsafe checkpoint path in {pointer_path}: {relative_checkpoint}")
++        checkpoint_dir = (path / relative_checkpoint).resolve()
++        if path != checkpoint_dir and path not in checkpoint_dir.parents:
++            raise ValueError(f"Checkpoint pointer escapes run directory: {pointer_path}")
++
++    metadata_path = checkpoint_dir / CHECKPOINT_METADATA_FILENAME
++    trainer_state_path = checkpoint_dir / TRAINER_STATE_FILENAME
++    if not metadata_path.is_file() or not trainer_state_path.is_file():
++        raise FileNotFoundError(f"Incomplete atomic checkpoint: {checkpoint_dir}")
++    with metadata_path.open("r", encoding="utf-8") as stream:
++        metadata = json.load(stream)
++    if metadata.get("format_version") != ATOMIC_CHECKPOINT_FORMAT_VERSION:
++        raise ValueError(f"Unsupported checkpoint format: {metadata_path}")
++    if requested_step is not None and metadata.get("step") != requested_step:
++        raise ValueError(
++            f"Requested resume step {requested_step}, but checkpoint contains step {metadata.get('step')}"
++        )
++    return checkpoint_dir
++
++
++def load_checkpoint_metadata(checkpoint_dir: Path) -> dict[str, Any]:
++    """Load the small checkpoint manifest without materializing optimizer tensors."""
++    with (checkpoint_dir / CHECKPOINT_METADATA_FILENAME).open("r", encoding="utf-8") as stream:
++        return json.load(stream)
++
++
++def build_training_contract(cfg) -> dict[str, Any]:
++    """Record settings that must not change when optimizer state is resumed."""
++    base_vla_source = getattr(cfg, "base_vla_source", cfg.vla_path)
++    configured_vla_path = Path(base_vla_source).expanduser()
++    normalized_vla_path = (
++        str(configured_vla_path.resolve()) if configured_vla_path.exists() else str(base_vla_source)
++    )
++    contract = {
++        "vla_path": normalized_vla_path,
++        "dataset_name": cfg.dataset_name,
++        "use_l1_regression": cfg.use_l1_regression,
++        "use_diffusion": cfg.use_diffusion,
++        "use_film": cfg.use_film,
++        "num_diffusion_steps_train": cfg.num_diffusion_steps_train,
++        "num_images_in_input": cfg.num_images_in_input,
++        "use_proprio": cfg.use_proprio,
++        "batch_size": cfg.batch_size,
++        "grad_accumulation_steps": cfg.grad_accumulation_steps,
++        "learning_rate": cfg.learning_rate,
++        "lr_warmup_steps": cfg.lr_warmup_steps,
++        "num_steps_before_decay": cfg.num_steps_before_decay,
++        "image_aug": cfg.image_aug,
++        "lora_rank": cfg.lora_rank,
++        "lora_dropout": cfg.lora_dropout,
++        "action_dim": ACTION_DIM,
++        "proprio_dim": PROPRIO_DIM,
++        "num_actions_chunk": NUM_ACTIONS_CHUNK,
++        "normalization": ACTION_PROPRIO_NORMALIZATION_TYPE,
++    }
++    control_hz = getattr(cfg, "control_hz", None)
++    if control_hz is not None:
++        if not math.isfinite(control_hz) or control_hz <= 0:
++            raise ValueError(f"control_hz must be positive, got {control_hz}")
++        contract["control_hz"] = float(control_hz)
++
++    robot_contract_path = getattr(cfg, "robot_contract_path", None)
++    robot_contract = None
++    if robot_contract_path is not None:
++        with Path(robot_contract_path).expanduser().open("r", encoding="utf-8") as stream:
++            robot_contract = json.load(stream)
++        required_fields = {
++            "schema_version",
++            "robot_type",
++            "action_encoding",
++            "action_names",
++            "state_names",
++            "action_units",
++            "state_units",
++            "camera_names",
++            "command_names",
++        }
++        missing_fields = sorted(required_fields - set(robot_contract))
++        if missing_fields:
++            raise ValueError(f"robot contract is missing fields: {missing_fields}")
++        expected_lengths = {
++            "action_names": ACTION_DIM,
++            "state_names": PROPRIO_DIM,
++            "action_units": ACTION_DIM,
++            "state_units": PROPRIO_DIM,
++            "command_names": ACTION_DIM,
++            "camera_names": cfg.num_images_in_input,
++        }
++        invalid_lengths = {
++            key: {"actual": len(robot_contract[key]), "expected": length}
++            for key, length in expected_lengths.items()
++            if not isinstance(robot_contract[key], list) or len(robot_contract[key]) != length
++        }
++        if invalid_lengths:
++            raise ValueError(f"robot contract field lengths are invalid: {invalid_lengths}")
++        contract_hz = robot_contract.get("control_hz")
++        if control_hz is not None and contract_hz is not None and not math.isclose(float(contract_hz), control_hz):
++            raise ValueError(f"robot contract control_hz mismatch: contract={contract_hz}, cfg={control_hz}")
++        contract["robot_contract"] = robot_contract
++
++    source_schema_path = getattr(cfg, "source_schema_path", None)
++    if source_schema_path is not None:
++        with Path(source_schema_path).expanduser().open("r", encoding="utf-8") as stream:
++            source_schema = json.load(stream)
++        canonical_schema = json.dumps(source_schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
++        contract["source_schema_sha256"] = hashlib.sha256(canonical_schema).hexdigest()
++        source_hz = source_schema.get("fps")
++        if control_hz is not None and source_hz is not None and not math.isclose(float(source_hz), control_hz):
++            raise ValueError(f"source schema fps mismatch: source={source_hz}, cfg={control_hz}")
++        if robot_contract is not None:
++            features = source_schema.get("features", {})
++            source_action_names = features.get("action", {}).get("names")
++            source_state_names = features.get("observation.state", {}).get("names")
++            if source_action_names != robot_contract["action_names"]:
++                raise ValueError("source action names do not match robot contract")
++            if source_state_names != robot_contract["state_names"]:
++                raise ValueError("source state names do not match robot contract")
++            missing_cameras = [
++                name
++                for name in robot_contract["camera_names"]
++                if f"observation.images.{name}" not in features
++            ]
++            if missing_cameras:
++                raise ValueError(f"source schema is missing cameras: {missing_cameras}")
++    return contract
++
++
++def validate_training_contract(cfg, metadata: dict[str, Any]) -> None:
++    """Reject resumes that would silently change optimizer or model semantics."""
++    saved_contract = metadata.get("training_contract")
++    current_contract = build_training_contract(cfg)
++    if saved_contract != current_contract:
++        saved_contract = saved_contract or {}
++        mismatches = {
++            key: {"checkpoint": saved_contract.get(key), "current": current_contract.get(key)}
++            for key in sorted(set(saved_contract) | set(current_contract))
++            if saved_contract.get(key) != current_contract.get(key)
++        }
++        raise ValueError(f"Resume training contract mismatch: {mismatches}")
++
++
++def capture_rng_state() -> dict[str, Any]:
++    """Capture Python, NumPy, and PyTorch RNG state for best-effort continuation."""
++    return {
++        "python": random.getstate(),
++        "numpy": np.random.get_state(),
++        "torch_cpu": torch.get_rng_state(),
++        "torch_cuda": torch.cuda.get_rng_state_all(),
++    }
++
++
++def restore_rng_state(rng_state: dict[str, Any]) -> None:
++    """Restore RNG state saved by capture_rng_state()."""
++    random.setstate(rng_state["python"])
++    np.random.set_state(rng_state["numpy"])
++    torch.set_rng_state(rng_state["torch_cpu"])
++    torch.cuda.set_rng_state_all(rng_state["torch_cuda"])
++
++
+ def remove_ddp_in_checkpoint(state_dict) -> dict:
+     """
+     Removes the 'module.' prefix from parameter names in a PyTorch model state dictionary that was saved using
+@@ -158,6 +431,13 @@ def get_run_id(cfg) -> str:
+     if cfg.run_id_override is not None:
+         # Override the run ID with the user-provided ID
+         run_id = cfg.run_id_override
++    elif cfg.resume and cfg.resume_checkpoint_dir is not None:
++        checkpoint_path = Path(cfg.resume_checkpoint_dir)
++        run_id = (
++            checkpoint_path.parent.parent.name
++            if checkpoint_path.parent.name == ATOMIC_CHECKPOINTS_DIRNAME
++            else checkpoint_path.name
++        )
+     elif cfg.resume:
+         # Override run ID with the previous resumed run's ID
+         run_id = cfg.vla_path.split("/")[-1]
+@@ -179,7 +459,7 @@ def get_run_id(cfg) -> str:
+     return run_id
+ 
+ 
+-def load_checkpoint(module_name: str, path: str, step: int, device: str = "cpu") -> dict:
++def load_checkpoint(module_name: str, path: Path, step: Optional[int], device: str = "cpu") -> dict:
+     """
+     Loads a checkpoint for a given module.
+ 
+@@ -192,7 +472,14 @@ def load_checkpoint(module_name: str, path: str, step: int, device: str = "cpu")
+     Returns:
+         dict: PyTorch model state dictionary.
+     """
+-    checkpoint_path = os.path.join(path, f"{module_name}--{step}_checkpoint.pt")
++    path = Path(path)
++    candidates = [path / f"{module_name}.pt"]
++    if step is not None:
++        candidates.append(path / f"{module_name}--{step}_checkpoint.pt")
++    candidates.append(path / f"{module_name}--latest_checkpoint.pt")
++    checkpoint_path = next((candidate for candidate in candidates if candidate.is_file()), None)
++    if checkpoint_path is None:
++        raise FileNotFoundError(f"No checkpoint for {module_name}; checked: {candidates}")
+     print(f"Loading checkpoint: {checkpoint_path}")
+     state_dict = torch.load(checkpoint_path, weights_only=True, map_location=device)
+     return remove_ddp_in_checkpoint(state_dict)
+@@ -256,7 +543,7 @@ def init_module(
+     count_parameters(module, module_name)
+ 
+     if cfg.resume:
+-        state_dict = load_checkpoint(module_name, cfg.vla_path, cfg.resume_step)
++        state_dict = load_checkpoint(module_name, cfg.resume_checkpoint_dir, cfg.resume_step)
+         module.load_state_dict(state_dict)
+ 
+     if to_bf16:
+@@ -582,6 +869,8 @@ def save_training_checkpoint(
+     action_head,
+     train_dataset,
+     distributed_state,
++    optimizer,
++    scheduler,
+ ) -> None:
+     """
+     Save all training checkpoints including model components, LoRA adapter, and dataset statistics.
+@@ -601,68 +890,89 @@ def save_training_checkpoint(
+     Returns:
+         None.
+     """
+-    # Determine checkpoint paths and naming
+-    if cfg.save_latest_checkpoint_only:
+-        checkpoint_dir = run_dir
+-        checkpoint_name_suffix = "latest_checkpoint.pt"
+-    else:
+-        checkpoint_dir = Path(str(run_dir) + f"--{log_step}_chkpt")
+-        checkpoint_name_suffix = f"{log_step}_checkpoint.pt"
+-
+-    adapter_dir = checkpoint_dir / "lora_adapter"
+-
+-    # Create directories and save dataset statistics (main process only)
+-    if distributed_state.is_main_process:
+-        os.makedirs(checkpoint_dir, exist_ok=True)
+-        os.makedirs(adapter_dir, exist_ok=True)
+-        save_dataset_statistics(train_dataset.dataset_statistics, checkpoint_dir)
+-        print(f"Saving Model Checkpoint for Step {log_step}")
+-
+-    # Wait for directories to be created
+-    dist.barrier()
++    run_dir = Path(run_dir).resolve()
++    checkpoints_dir = run_dir / ATOMIC_CHECKPOINTS_DIRNAME
++    checkpoint_dir = get_checkpoint_step_dir(run_dir, log_step)
+ 
+-    # Save model components (main process only)
+     if distributed_state.is_main_process:
+-        # Save processor and LoRA adapter
+-        processor.save_pretrained(checkpoint_dir)
+-        vla.module.save_pretrained(adapter_dir)
+-
+-        # Save other components
+-        if cfg.use_proprio and proprio_projector is not None:
+-            torch.save(proprio_projector.state_dict(), checkpoint_dir / f"proprio_projector--{checkpoint_name_suffix}")
+-
+-        if cfg.use_diffusion and noisy_action_projector is not None:
+-            torch.save(
+-                noisy_action_projector.state_dict(), checkpoint_dir / f"noisy_action_projector--{checkpoint_name_suffix}"
++        checkpoints_dir.mkdir(parents=True, exist_ok=True)
++        staging_dir = checkpoints_dir / f".{checkpoint_dir.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
++        if checkpoint_dir.exists():
++            raise FileExistsError(f"Refusing to replace immutable checkpoint: {checkpoint_dir}")
++
++        try:
++            staging_dir.mkdir()
++            adapter_dir = staging_dir / "lora_adapter"
++            adapter_dir.mkdir()
++            print(f"Saving Atomic Model Checkpoint for Step {log_step}")
++
++            processor.save_pretrained(staging_dir)
++            vla.module.save_pretrained(adapter_dir)
++            save_dataset_statistics(train_dataset.dataset_statistics, staging_dir)
++
++            if cfg.use_proprio and proprio_projector is not None:
++                torch.save(proprio_projector.state_dict(), staging_dir / "proprio_projector.pt")
++            if cfg.use_diffusion and noisy_action_projector is not None:
++                torch.save(noisy_action_projector.state_dict(), staging_dir / "noisy_action_projector.pt")
++            if (cfg.use_l1_regression or cfg.use_diffusion) and action_head is not None:
++                torch.save(action_head.state_dict(), staging_dir / "action_head.pt")
++            if cfg.use_film:
++                torch.save(vla.module.vision_backbone.state_dict(), staging_dir / "vision_backbone.pt")
++
++            if cfg.use_lora and cfg.merge_lora_during_training:
++                use_remote_code = model_is_on_hf_hub(cfg.vla_path)
++                base_vla = AutoModelForVision2Seq.from_pretrained(
++                    cfg.vla_path,
++                    torch_dtype=torch.bfloat16,
++                    low_cpu_mem_usage=True,
++                    trust_remote_code=use_remote_code,
++                )
++                merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir).merge_and_unload()
++                merged_vla.save_pretrained(staging_dir / "merged_model")
++
++            trainer_state = {
++                "format_version": ATOMIC_CHECKPOINT_FORMAT_VERSION,
++                "step": log_step,
++                "optimizer": optimizer.state_dict(),
++                "scheduler": scheduler.state_dict(),
++                "rng_state": capture_rng_state(),
++            }
++            torch.save(trainer_state, staging_dir / TRAINER_STATE_FILENAME)
++            atomic_write_json(
++                staging_dir / CHECKPOINT_METADATA_FILENAME,
++                {
++                    "format_version": ATOMIC_CHECKPOINT_FORMAT_VERSION,
++                    "step": log_step,
++                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
++                    "base_vla_path": str(getattr(cfg, "base_vla_source", cfg.vla_path)),
++                    "training_contract": build_training_contract(cfg),
++                },
+             )
+ 
+-        if (cfg.use_l1_regression or cfg.use_diffusion) and action_head is not None:
+-            torch.save(action_head.state_dict(), checkpoint_dir / f"action_head--{checkpoint_name_suffix}")
+-
+-        if cfg.use_film:
+-            # To be safe, just save the entire vision backbone (not just FiLM components)
+-            torch.save(
+-                vla.module.vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
++            _fsync_tree(staging_dir)
++            os.replace(staging_dir, checkpoint_dir)
++            _fsync_directory(checkpoints_dir)
++            atomic_write_json(
++                run_dir / LATEST_CHECKPOINT_POINTER,
++                {
++                    "format_version": ATOMIC_CHECKPOINT_FORMAT_VERSION,
++                    "step": log_step,
++                    "checkpoint": str(checkpoint_dir.relative_to(run_dir)),
++                },
+             )
+ 
+-    # Wait for model components to be saved
+-    dist.barrier()
+-
+-    # Merge LoRA weights into base model and save resulting model checkpoint
+-    # Note: Can be very slow on some devices; if so, we recommend merging offline
+-    if cfg.use_lora and cfg.merge_lora_during_training:
+-        base_vla = AutoModelForVision2Seq.from_pretrained(
+-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+-        )
+-        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+-        merged_vla = merged_vla.merge_and_unload()
++            if cfg.save_latest_checkpoint_only:
++                for previous_checkpoint in checkpoints_dir.glob("step-*"):
++                    if previous_checkpoint != checkpoint_dir and previous_checkpoint.is_dir():
++                        shutil.rmtree(previous_checkpoint)
++                _fsync_directory(checkpoints_dir)
+ 
+-        if distributed_state.is_main_process:
+-            merged_vla.save_pretrained(checkpoint_dir)
+-            print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
++            print(f"Atomic Checkpoint Committed for Step {log_step}: {checkpoint_dir}")
++        finally:
++            if staging_dir.exists():
++                shutil.rmtree(staging_dir)
+ 
+-        # Wait for merged model to be saved
+-        dist.barrier()
++    dist.barrier()
+ 
+ 
+ def run_validation(
+@@ -767,9 +1077,23 @@ def finetune(cfg: FinetuneConfig) -> None:
+         None.
+     """
+     assert cfg.use_lora, "Only LoRA fine-tuning is supported. Please set --use_lora=True!"
++    cfg.base_vla_source = cfg.vla_path.rstrip("/")
+     assert not (cfg.use_l1_regression and cfg.use_diffusion), (
+         "Cannot do both L1 regression and diffusion. Please pick one of them!"
+     )
++    if cfg.grad_accumulation_steps < 1:
++        raise ValueError("grad_accumulation_steps must be positive")
++    initial_step = 0
++    if cfg.resume:
++        if cfg.resume_checkpoint_dir is None:
++            raise ValueError("resume_checkpoint_dir is required when resume=True")
++        cfg.resume_checkpoint_dir = resolve_resume_checkpoint(cfg.resume_checkpoint_dir, cfg.resume_step)
++        resume_metadata = load_checkpoint_metadata(cfg.resume_checkpoint_dir)
++        validate_training_contract(cfg, resume_metadata)
++        initial_step = int(resume_metadata["step"])
++        cfg.resume_step = initial_step
++    if not 0 <= initial_step < cfg.max_steps:
++        raise ValueError(f"Expected 0 <= initial_step < max_steps, got {initial_step} and {cfg.max_steps}")
+ 
+     # Trim trailing forward slash ('/') in VLA path if it exists
+     cfg.vla_path = cfg.vla_path.rstrip("/")
+@@ -779,7 +1103,10 @@ def finetune(cfg: FinetuneConfig) -> None:
+     run_id = get_run_id(cfg)
+ 
+     # Create experiment run directory
+-    run_dir = cfg.run_root_dir / run_id
++    if cfg.resume and cfg.run_id_override is None:
++        run_dir = cfg.resume_checkpoint_dir.parent.parent
++    else:
++        run_dir = cfg.run_root_dir / run_id
+     os.makedirs(run_dir, exist_ok=True)
+ 
+     # GPU setup
+@@ -810,7 +1137,8 @@ def finetune(cfg: FinetuneConfig) -> None:
+     # the `modeling_prismatic.py` file in this codebase; if so, we will copy
+     # the file to the downloaded or locally stored checkpoint directory so
+     # that the user's changes to the VLA class logic go into effect
+-    if model_is_on_hf_hub(cfg.vla_path):
++    use_hf_remote_code = model_is_on_hf_hub(cfg.vla_path)
++    if use_hf_remote_code:
+         # Download model directly from Hugging Face Hub
+         vla_download_path = snapshot_download(repo_id=cfg.vla_path)
+         # Overwrite VLA path
+@@ -831,22 +1159,33 @@ def finetune(cfg: FinetuneConfig) -> None:
+     dist.barrier()
+ 
+     # Load processor and VLA
+-    processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
++    processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=use_hf_remote_code)
+     vla = AutoModelForVision2Seq.from_pretrained(
+         cfg.vla_path,
+         torch_dtype=torch.bfloat16,
+         low_cpu_mem_usage=True,
+-        trust_remote_code=True,
++        trust_remote_code=use_hf_remote_code,
+     ).to(device_id)
+ 
+     # Set number of images in VLA input
+     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+ 
+     # LoRA setup
+-    if cfg.use_lora:
++    if cfg.resume:
++        adapter_dir = cfg.resume_checkpoint_dir / "lora_adapter"
++        if not adapter_dir.is_dir():
++            raise FileNotFoundError(f"Missing LoRA adapter in atomic checkpoint: {adapter_dir}")
++        vla = PeftModel.from_pretrained(vla, adapter_dir, is_trainable=True)
++        vla.print_trainable_parameters()
++    elif cfg.use_lora:
++        resolved_lora_alpha = (
++            min(cfg.lora_rank, 16) if cfg.lora_alpha is None else cfg.lora_alpha
++        )
++        if resolved_lora_alpha < 1:
++            raise ValueError(f"lora_alpha must be positive, got {resolved_lora_alpha}")
+         lora_config = LoraConfig(
+             r=cfg.lora_rank,
+-            lora_alpha=min(cfg.lora_rank, 16),
++            lora_alpha=resolved_lora_alpha,
+             lora_dropout=cfg.lora_dropout,
+             target_modules="all-linear",
+             init_lora_weights="gaussian",
+@@ -867,7 +1206,7 @@ def finetune(cfg: FinetuneConfig) -> None:
+         )
+         count_parameters(vla.vision_backbone, "vla.vision_backbone (post-wrap)")
+         if cfg.resume:
+-            state_dict = load_checkpoint("vision_backbone", cfg.vla_path, cfg.resume_step)
++            state_dict = load_checkpoint("vision_backbone", cfg.resume_checkpoint_dir, cfg.resume_step)
+             vla.model.vision_backbone.load_state_dict(state_dict)
+         vla.model.vision_backbone = vla.model.vision_backbone.to(device_id)
+ 
+@@ -944,6 +1283,25 @@ def finetune(cfg: FinetuneConfig) -> None:
+         gamma=0.1,  # Multiplicative factor of learning rate decay
+     )
+ 
++    if cfg.resume:
++        trainer_state = torch.load(
++            cfg.resume_checkpoint_dir / TRAINER_STATE_FILENAME,
++            map_location="cpu",
++            weights_only=False,
++        )
++        if trainer_state.get("format_version") != ATOMIC_CHECKPOINT_FORMAT_VERSION:
++            raise ValueError(f"Unsupported trainer state: {cfg.resume_checkpoint_dir / TRAINER_STATE_FILENAME}")
++        if int(trainer_state.get("step", -1)) != initial_step:
++            raise ValueError(
++                f"Trainer state step {trainer_state.get('step')} does not match checkpoint step {initial_step}"
++            )
++        optimizer.load_state_dict(trainer_state["optimizer"])
++        scheduler.load_state_dict(trainer_state["scheduler"])
++        restore_rng_state(trainer_state["rng_state"])
++        del trainer_state
++        gc.collect()
++        print(f"Resumed optimizer, scheduler, and RNG state from Step {initial_step}")
++
+     # Create Action Tokenizer
+     action_tokenizer = ActionTokenizer(processor.tokenizer)
+ 
+@@ -1029,7 +1387,10 @@ def finetune(cfg: FinetuneConfig) -> None:
+     }
+ 
+     # Start training
+-    with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
++    torch.cuda.reset_peak_memory_stats(device_id)
++    training_start_time = time.time()
++    final_update_step = initial_step
++    with tqdm.tqdm(total=cfg.max_steps - initial_step, leave=False) as progress:
+         vla.train()
+         optimizer.zero_grad()
+         for batch_idx, batch in enumerate(dataloader):
+@@ -1063,47 +1424,43 @@ def finetune(cfg: FinetuneConfig) -> None:
+                 if metric_name in recent_metrics:
+                     recent_metrics[metric_name].append(value)
+ 
+-            # Compute gradient step index
+-            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+-
+-            # Compute smoothened train metrics
+-            smoothened_metrics = compute_smoothened_metrics(recent_metrics)
+-
+-            # Push Metrics to W&B (every wandb_log_freq gradient steps)
+-            log_step = gradient_step_idx if not cfg.resume else cfg.resume_step + gradient_step_idx
+-            if distributed_state.is_main_process and log_step % cfg.wandb_log_freq == 0:
+-                log_metrics_to_wandb(smoothened_metrics, "VLA Train", log_step, wandb)
++            # Only update parameters and run step-based side effects at an accumulation boundary.
++            update_step = get_optimizer_update_step(batch_idx, cfg.grad_accumulation_steps, initial_step)
++            if update_step is None:
++                continue
+ 
+-            # [If applicable] Linearly warm up learning rate from 10% to 100% of original
+-            if cfg.lr_warmup_steps > 0:
+-                lr_progress = min((gradient_step_idx + 1) / cfg.lr_warmup_steps, 1.0)  # Cap at 1.0
++            # [If applicable] Linearly warm up learning rate from 10% to 100% of original.
++            # Stop assigning the warmup LR after warmup so later scheduler decay remains effective.
++            if 0 < update_step <= cfg.lr_warmup_steps:
++                lr_progress = update_step / cfg.lr_warmup_steps
+                 current_lr = original_lr * (0.1 + 0.9 * lr_progress)
+                 for param_group in optimizer.param_groups:
+                     param_group["lr"] = current_lr
+ 
+-            if distributed_state.is_main_process and gradient_step_idx % cfg.wandb_log_freq == 0:
+-                # Log the learning rate
+-                # Make sure to do this AFTER any learning rate modifications (e.g., warmup/decay)
++            update_learning_rate = optimizer.param_groups[0]["lr"]
++            optimizer.step()
++            scheduler.step()
++            optimizer.zero_grad()
++            progress.update()
++            final_update_step = update_step
++
++            # Compute and log one averaged metric set for this completed optimizer update.
++            smoothened_metrics = compute_smoothened_metrics(recent_metrics)
++            if distributed_state.is_main_process and update_step % cfg.wandb_log_freq == 0:
++                log_metrics_to_wandb(smoothened_metrics, "VLA Train", update_step, wandb)
+                 wandb.log(
+                     {
+-                        "VLA Train/Learning Rate": scheduler.get_last_lr()[0],
++                        "VLA Train/Learning Rate": update_learning_rate,
+                     },
+-                    step=log_step,
++                    step=update_step,
+                 )
+ 
+-            # Optimizer and LR scheduler step
+-            if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
+-                optimizer.step()
+-                scheduler.step()
+-                optimizer.zero_grad()
+-                progress.update()
+-
+             # Save model checkpoint: either keep latest checkpoint only or all checkpoints
+-            if gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
++            if should_save_checkpoint(update_step, cfg.save_freq, cfg.max_steps):
+                 save_training_checkpoint(
+                     cfg=cfg,
+                     run_dir=run_dir,
+-                    log_step=log_step,
++                    log_step=update_step,
+                     vla=vla,
+                     processor=processor,
+                     proprio_projector=proprio_projector if cfg.use_proprio else None,
+@@ -1111,10 +1468,12 @@ def finetune(cfg: FinetuneConfig) -> None:
+                     action_head=action_head if (cfg.use_l1_regression or cfg.use_diffusion) else None,
+                     train_dataset=train_dataset,
+                     distributed_state=distributed_state,
++                    optimizer=optimizer,
++                    scheduler=scheduler,
+                 )
+ 
+             # Test model on validation set
+-            if cfg.use_val_set and log_step > 0 and log_step % cfg.val_freq == 0:
++            if cfg.use_val_set and update_step % cfg.val_freq == 0:
+                 run_validation(
+                     vla=vla,
+                     action_head=action_head,
+@@ -1125,7 +1484,7 @@ def finetune(cfg: FinetuneConfig) -> None:
+                     device_id=device_id,
+                     cfg=cfg,
+                     num_patches=NUM_PATCHES,
+-                    log_step=log_step,
++                    log_step=update_step,
+                     distributed_state=distributed_state,
+                     val_time_limit=cfg.val_time_limit,
+                 )
+@@ -1133,10 +1492,26 @@ def finetune(cfg: FinetuneConfig) -> None:
+                 vla.train()
+ 
+             # Stop training when max_steps is reached
+-            if log_step == cfg.max_steps:
++            if update_step >= cfg.max_steps:
+                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                 break
+ 
++    torch.cuda.synchronize(device_id)
++    training_elapsed_seconds = time.time() - training_start_time
++    completed_updates = final_update_step - initial_step
++    completed_micro_batches = completed_updates * cfg.grad_accumulation_steps
++    if distributed_state.is_main_process:
++        print(f"optimizer_updates_completed={completed_updates}")
++        print(f"micro_batches_completed={completed_micro_batches}")
++        print(f"training_elapsed_seconds={training_elapsed_seconds:.3f}")
++        print(f"optimizer_updates_per_second={completed_updates / training_elapsed_seconds:.4f}")
++        print(f"micro_batches_per_second={completed_micro_batches / training_elapsed_seconds:.4f}")
++        print(f"peak_vram_mib={torch.cuda.max_memory_allocated(device_id) / 1024**2:.1f}")
++        print(f"peak_reserved_vram_mib={torch.cuda.max_memory_reserved(device_id) / 1024**2:.1f}")
++
++    if dist.is_initialized():
++        dist.destroy_process_group()
++
+ 
+ if __name__ == "__main__":
+     finetune()

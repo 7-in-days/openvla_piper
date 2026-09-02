@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openvla-two-block-pnp"
+version = "0.1.0"
+description = "Standalone checkpoint-driven OpenVLA-OFT inference for Piper"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy", "Pillow", "roslibpy", "huggingface_hub"]
+
+[project.scripts]
+openvla-pipeline-python = "openvla_pipeline.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openvla_pipeline*", "openvla_async_pipeline*"]
+
+[tool.setuptools.data-files]
+"share/openvla-two-block-pnp" = ["configs/runtime/openvla_piper.json"]
