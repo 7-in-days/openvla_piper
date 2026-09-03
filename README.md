@@ -34,6 +34,17 @@ scripts/install_rtx4090.sh \
 `.install-prefix`, `.lerobot-prefix`, `.openvla-oft-repo`, `.piper-repo`에 기록되며 런처가
 자동으로 읽는다.
 
+Pi0 워크스페이스와 같은 방식으로 지속 설정은 역할별 YAML 한 장이 단일 기준이다.
+
+| 설정 파일 | 바꾸는 값 |
+|---|---|
+| `configs/runtime/openvla_piper.yaml` | checkpoint/base model, FastAPI, rosbridge, task, rollout 길이, 로그, live gate |
+| `configs/rlds/piper_bridge.yaml` | LeRobot 원본, HF revision/hash, RLDS 이름·출력·split, episode 검증 |
+| `configs/training/openvla_lora.yaml` | RLDS/base/run 경로, action horizon, LoRA, optimizer, validation, W&B |
+
+세 YAML은 중복 key, 알 수 없는 key, 누락 key, schema version, 타입과 범위를 시작 전에 엄격히
+검사한다. 명령행 옵션은 일회성 override용이며 우선순위는 `CLI > 환경 변수 > YAML`이다.
+
 모델은 별도로 한 번 다운로드한다.
 
 ```bash
@@ -67,16 +78,9 @@ TFDS/RLDS로 변환한 다음 RLDS loader로 fine-tuning하는 방식이다. 따
 변환 전용 환경은 LeRobot 환경을 읽기 전용으로 상속하고 TensorFlow/TFDS만 프로젝트 내부에
 설치한다.
 
-`vla_pipeline`과 같은 방식으로 기본값을 코드 상단에서 바꿀 수 있다.
-
-- 변환/Hugging Face 경로·repo·RLDS 이름: `scripts/openvla-pipeline`의
-  `DATASET USER SETTINGS`
-- 직접 변환의 source/output/split/instruction: `scripts/convert_lerobot_to_rlds.py`의
-  `USER SETTINGS`
-- 학습 경로·dataset·horizon·모델/LoRA/optimizer/validation/W&B:
-  `scripts/train_openvla_lora.sh`의 `USER SETTINGS`
-
-실행할 때만 바꾸려면 CLI를 사용하며 우선순위는 `CLI > 상단 USER SETTINGS`다.
+변환 기본값은 `configs/rlds/piper_bridge.yaml`, 학습 기본값은
+`configs/training/openvla_lora.yaml`에서 바꾼다. Python 코드 안에는 실행할 외부 command 배열만
+있고 사용자 설정은 중복하지 않는다. 기존 CLI 옵션은 그대로 일회성 override로 사용할 수 있다.
 
 ```bash
 cd /home/pc/openvla_piper
@@ -117,7 +121,7 @@ instruction이며 FiLM은 단일 instruction 작업이므로 끈다. 기본 acti
 정확한 실행 명령만 먼저 확인:
 
 ```bash
-scripts/openvla-pipeline train-lora --action-horizon 50 --dry-run
+scripts/openvla-pipeline train-lora --dry-run
 ```
 
 RTX 4090에서 실제 학습:
@@ -125,14 +129,12 @@ RTX 4090에서 실제 학습:
 ```bash
 cd /home/pc/openvla_piper
 scripts/openvla-pipeline train-lora \
-  --action-horizon 50 \
-  --batch-size 1 \
-  --gradient-accumulation 8 \
-  --max-steps 100000 \
-  --save-freq 10000
+  --config configs/training/openvla_lora.yaml
 ```
 
-기본 W&B 모드는 `offline`이며, 온라인 기록이 필요할 때만 `--wandb-mode online`을 사용한다.
+기본 YAML은 action horizon 50, batch 1, gradient accumulation 8, max steps 100000,
+save frequency 10000으로 설정돼 있다. 기본 W&B 모드는 `offline`이며, 온라인 기록이 필요할
+때만 `--wandb-mode online`을 사용한다.
 학습 checkpoint에는 action/state/camera/control-Hz와 원본 LeRobot schema hash를 함께 저장하므로
 다른 robot/action contract로 잘못 재개하는 것을 막는다.
 
@@ -175,8 +177,8 @@ ROS_DOMAIN_ID=17 ros2 topic hz /piper/synced/frame
 
 ## 4. 체크포인트, LoRA 병합, FastAPI 계약
 
-`openvla_pipeline/user_settings.py`와 기본 JSON 설정에는 위 로컬 checkpoint, base model,
-two-block PnP instruction이 이미 지정돼 있다. 서버 시작 순서는 다음과 같이 고정된다.
+`configs/runtime/openvla_piper.yaml`에는 위 로컬 checkpoint, base model, two-block PnP
+instruction이 이미 지정돼 있다. 서버 시작 순서는 다음과 같이 고정된다.
 
 1. local-only로 `openvla/openvla-7b` base weights와 processor 로드
 2. `PeftModel.from_pretrained()`로 `lora_adapter` 부착
@@ -193,8 +195,8 @@ scripts/openvla-pipeline show-config
 scripts/openvla-pipeline plan
 ```
 
-다른 checkpoint를 시험할 때만 `--checkpoint`와 `--base-model`로 덮어쓴다. 설정 우선순위는
-CLI > 환경 변수 > JSON config > `user_settings.py`다.
+다른 checkpoint를 시험할 때만 `--checkpoint`와 `--base-model`로 덮어쓴다. 지속 변경은 runtime
+YAML에 기록하며 설정 우선순위는 CLI > 환경 변수 > YAML이다.
 
 ## 5. 추론 명령어
 
@@ -251,7 +253,7 @@ scripts/openvla-pipeline dry-run \
 executor, local `inference_gate`, rosbridge를 준비한다. 실제 action 발행에는 아래 세 조건이
 모두 필요하다.
 
-1. `user_settings.py`의 `ALLOW_LIVE_MOTION = True` 또는 JSON config의 동등한 설정
+1. `configs/runtime/openvla_piper.yaml`의 `safety.allow_live_motion: true`
 2. 현재 터미널에만 `PIPER_OPENVLA_LIVE_CONFIRMED=YES`
 3. 명시적인 `run-robot` 명령
 

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 from pathlib import Path
@@ -11,14 +10,32 @@ from pathlib import Path
 import numpy as np
 import tensorflow_datasets as tfds
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, required=True)
-    parser.add_argument("--dataset-name", default="piper_bridge")
-    parser.add_argument("--expected-episode-frames", type=int)
-    parser.add_argument("--openvla-oft-repo", type=Path)
-    return parser.parse_args()
+from openvla_pipeline.cli import Option, parse_options, selected_option
+from openvla_pipeline.workspace_config import DEFAULT_RLDS_CONFIG, load_rlds_config
+
+
+def parse_args(argv: list[str] | None = None):
+    config_path = selected_option(argv, "config", Path) or DEFAULT_RLDS_CONFIG
+    config = load_rlds_config(config_path)
+    args, _ = parse_options(
+        argv,
+        (
+            Option("config", converter=Path, default=config.source_path, help="RLDS YAML path"),
+            Option("data_root", converter=Path, default=config.output_root),
+            Option("dataset_name", default=config.dataset_name),
+            Option(
+                "expected_episode_frames",
+                converter=int,
+                default=config.expected_episode_frames,
+            ),
+            Option("openvla_oft_repo", converter=Path, default=config.openvla_oft_repo),
+        ),
+        description="Verify raw RLDS and OpenVLA-OFT PiPER registration.",
+    )
+    return args
 
 
 def main() -> int:
@@ -64,7 +81,7 @@ def main() -> int:
 
     oft_repo = args.openvla_oft_repo
     if oft_repo is None:
-        pointer = Path(__file__).resolve().parents[1] / ".openvla-oft-repo"
+        pointer = PROJECT_ROOT / ".openvla-oft-repo"
         if not pointer.is_file():
             raise FileNotFoundError(f"OpenVLA-OFT pointer is missing: {pointer}")
         oft_repo = Path(pointer.read_text(encoding="utf-8").strip())

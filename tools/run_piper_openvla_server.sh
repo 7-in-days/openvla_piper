@@ -72,7 +72,7 @@ while (( $# > 0 )); do
   esac
 done
 config_args=()
-config_source="${project_root}/openvla_pipeline/user_settings.py"
+config_source="${project_root}/configs/runtime/openvla_piper.yaml"
 if [[ -n "${runtime_config}" ]]; then
   test -f "${runtime_config}"
   runtime_config="$(readlink -f "${runtime_config}")"

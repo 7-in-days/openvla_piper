@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -12,6 +11,7 @@ import sys
 from typing import Literal
 from urllib.parse import urlsplit
 
+from openvla_pipeline.cli import selected_option, usage_error, without_switch
 from openvla_pipeline.config import RuntimeConfigError, load_runtime_config
 
 
@@ -35,10 +35,7 @@ class LaunchPlan:
 
 
 def _selected_config_path(argv: list[str]) -> Path | None:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--config", type=Path)
-    args, _ = parser.parse_known_args(argv)
-    return args.config
+    return selected_option(argv, "config", Path)
 
 
 def _parse_client_settings(kind: LaunchKind, argv: list[str]):
@@ -153,14 +150,15 @@ def _line_values(plan: LaunchPlan) -> tuple[str, ...]:
 
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
-    parser = argparse.ArgumentParser(
-        description="Resolve the shared OpenVLA sync/async launch contract"
-    )
-    parser.add_argument("kind", choices=("sync", "async"))
-    parser.add_argument("--lines", action="store_true")
-    known, forwarded = parser.parse_known_args(args)
-    plan = resolve_launch_plan(known.kind, forwarded)
-    if known.lines:
+    if not args or args[0] in {"-h", "--help"}:
+        print("usage: python -m openvla_pipeline.launch_plan {sync|async} [--lines] [client options]")
+        return
+    kind = args.pop(0)
+    if kind not in {"sync", "async"}:
+        usage_error(f"runtime kind must be sync or async, got {kind!r}")
+    lines, forwarded = without_switch(args, "lines")
+    plan = resolve_launch_plan(kind, forwarded)  # type: ignore[arg-type]
+    if lines:
         print("\n".join(_line_values(plan)))
     else:
         print(json.dumps(asdict(plan), indent=2, default=str, ensure_ascii=False))

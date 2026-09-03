@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 import json
 import os
@@ -13,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from openvla_pipeline import user_settings
+from openvla_pipeline.cli import Option, parse_options, selected_option, usage_error
 from openvla_pipeline.model_io import (
     LIVE_CONFIRMATION,
     observation_to_request,
@@ -32,7 +31,7 @@ from openvla_pipeline.piper_runtime import (
 )
 
 
-DEFAULT_TASK = user_settings.TASK
+DEFAULT_TASK = load_runtime_config().client.task
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -71,84 +70,61 @@ class PiperPipelineConfig:
 
 
 def parse_settings(argv: list[str] | None = None) -> PiperPipelineConfig:
-    config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", type=Path)
-    config_args, _ = config_parser.parse_known_args(argv)
-    config = load_runtime_config(config_args.config)
+    config = load_runtime_config(selected_option(argv, "config", Path))
 
     default_mode = os.environ.get("PIPER_OPENVLA_MODE")
     if default_mode is None:
         default_mode = "dry-run" if _env_bool("PIPER_OPENVLA_DRY_RUN", True) else "live"
-    parser = argparse.ArgumentParser(description="OpenVLA server → existing Piper ROS topics")
-    parser.add_argument("--config", type=Path, default=config.source_path)
-    parser.add_argument("--mode", choices=("dry-run", "live"), default=default_mode)
-    parser.add_argument(
-        "--task",
-        default=os.environ.get("PIPER_OPENVLA_TASK", config.client.task),
-    )
-    parser.add_argument(
-        "--max-actions",
-        type=int,
-        default=int(os.environ.get("PIPER_OPENVLA_MAX_ACTIONS", config.client.max_actions)),
-    )
-    parser.add_argument(
-        "--async-prefetch",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool("PIPER_OPENVLA_ASYNC_PREFETCH", False),
-    )
-    parser.add_argument("--chunk-wait-timeout-s", type=float, default=3.0)
-    parser.add_argument("--max-chunk-age-s", type=float, default=2.0)
-    parser.add_argument(
-        "--server",
-        default=os.environ.get("PIPER_OPENVLA_SERVER", config.client.model_server),
-    )
-    parser.add_argument(
-        "--rosbridge-url",
-        default=os.environ.get("PIPER_ROSBRIDGE_URL", config.client.rosbridge_url),
-    )
-    parser.add_argument(
-        "--piper-repo",
-        type=Path,
-        default=Path(os.environ.get("PIPER_REPO", config.client.piper_repo)),
-    )
-    parser.add_argument("--log-root", type=Path, default=None)
-    parser.add_argument("--session-id", default=os.environ.get("PIPER_INFERENCE_SESSION_ID"))
-    parser.add_argument(
-        "--chunk-diagnostics",
-        action=argparse.BooleanOptionalAction,
-        default=_env_bool(
-            "PIPER_OPENVLA_CHUNK_DIAGNOSTICS",
-            config.client.chunk_diagnostics,
+    args, _ = parse_options(
+        argv,
+        (
+            Option("config", converter=Path, default=config.source_path),
+            Option("mode", default=default_mode, choices=("dry-run", "live")),
+            Option("task", default=os.environ.get("PIPER_OPENVLA_TASK", config.client.task)),
+            Option(
+                "max_actions",
+                converter=int,
+                default=int(os.environ.get("PIPER_OPENVLA_MAX_ACTIONS", config.client.max_actions)),
+            ),
+            Option(
+                "async_prefetch",
+                boolean=True,
+                default=_env_bool("PIPER_OPENVLA_ASYNC_PREFETCH", False),
+            ),
+            Option("chunk_wait_timeout_s", converter=float, default=3.0),
+            Option("max_chunk_age_s", converter=float, default=2.0),
+            Option("server", default=os.environ.get("PIPER_OPENVLA_SERVER", config.client.model_server)),
+            Option("rosbridge_url", default=os.environ.get("PIPER_ROSBRIDGE_URL", config.client.rosbridge_url)),
+            Option("piper_repo", converter=Path, default=Path(os.environ.get("PIPER_REPO", config.client.piper_repo))),
+            Option("log_root", converter=Path, default=None),
+            Option("session_id", default=os.environ.get("PIPER_INFERENCE_SESSION_ID")),
+            Option(
+                "chunk_diagnostics",
+                boolean=True,
+                default=_env_bool("PIPER_OPENVLA_CHUNK_DIAGNOSTICS", config.client.chunk_diagnostics),
+            ),
+            Option(
+                "health_timeout_s",
+                converter=float,
+                default=float(os.environ.get("PIPER_OPENVLA_HEALTH_TIMEOUT_S", config.client.health_timeout_s)),
+            ),
+            Option(
+                "request_timeout_s",
+                converter=float,
+                default=float(os.environ.get("PIPER_OPENVLA_REQUEST_TIMEOUT_S", config.client.request_timeout_s)),
+            ),
         ),
+        description="OpenVLA server → existing Piper ROS topics",
     )
-    parser.add_argument(
-        "--health-timeout-s",
-        type=float,
-        default=float(
-            os.environ.get(
-                "PIPER_OPENVLA_HEALTH_TIMEOUT_S", config.client.health_timeout_s
-            )
-        ),
-    )
-    parser.add_argument(
-        "--request-timeout-s",
-        type=float,
-        default=float(
-            os.environ.get(
-                "PIPER_OPENVLA_REQUEST_TIMEOUT_S", config.client.request_timeout_s
-            )
-        ),
-    )
-    args = parser.parse_args(argv)
     if args.max_actions < 1:
-        parser.error("--max-actions must be positive")
+        usage_error("--max-actions must be positive")
     if (
         args.chunk_wait_timeout_s <= 0
         or args.max_chunk_age_s <= 0
         or args.health_timeout_s <= 0
         or args.request_timeout_s <= 0
     ):
-        parser.error("chunk timeouts must be positive")
+        usage_error("chunk timeouts must be positive")
     log_root = args.log_root or Path(
         os.environ.get("PIPER_INFERENCE_LOG_ROOT", config.client.inference_log_root)
     )

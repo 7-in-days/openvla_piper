@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import ast
 import json
 import os
@@ -14,6 +13,7 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from openvla_pipeline.cli import Option, parse_options
 from openvla_pipeline.inference_logger import InferenceSessionLogger
 
 
@@ -110,11 +110,15 @@ def _logging_probe(log_root: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--piper-ws", type=Path, default=Path("/home/pc/piper_ws"))
-    parser.add_argument("--bridge-repo", type=Path, default=None)
-    parser.add_argument("--log-root", type=Path, default=PROJECT_ROOT / "inference_logs")
-    args = parser.parse_args()
+    args, _ = parse_options(
+        None,
+        (
+            Option("piper_ws", converter=Path, default=Path("/home/pc/piper_ws")),
+            Option("bridge_repo", converter=Path, default=None),
+            Option("log_root", converter=Path, default=PROJECT_ROOT / "inference_logs"),
+        ),
+        description="Verify piper_ws topics, units, QoS, and inference logging.",
+    )
 
     bridge_repo = args.bridge_repo
     if bridge_repo is None:

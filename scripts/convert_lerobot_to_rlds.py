@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -14,22 +13,11 @@ from typing import Any, Iterator
 
 import numpy as np
 
-
-# ============================== USER SETTINGS ==============================
-# vla_pipeline utility scripts처럼 직접 실행할 때의 기본값은 여기서 바꾼다.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE_ROOT = Path("/home/pc/vla_pipeline/episodes/two_block_pnp")
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "artifacts" / "rlds"
-DEFAULT_RLDS_DATASET_NAME = "piper_bridge"  # changing this also needs OpenVLA registry entries
-DEFAULT_RLDS_DATASET_VERSION = "1.0.0"
-DEFAULT_REPO_ID = "romalab-cbf/two_block_pnp"
-DEFAULT_SOURCE_REVISION = "4e1a8ce8da637dca8b2f1437ec5e613186d3dd34"
-DEFAULT_SOURCE_INFO_SHA256 = "8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9"
-DEFAULT_MAX_EPISODES = None
-DEFAULT_VAL_FRACTION = 0.05
-DEFAULT_SPLIT_SEED = 7
-DEFAULT_INSTRUCTION = None  # None keeps each recorded task string
-# ===========================================================================
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from openvla_pipeline.cli import Option, parse_options, selected_option
+from openvla_pipeline.workspace_config import DEFAULT_RLDS_CONFIG, load_rlds_config
 
 EXPECTED_VECTOR_NAMES = [
     "joint_1.pos",
@@ -46,30 +34,28 @@ IMAGE_KEYS = {
 }
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Convert PiPER LeRobotDataset v3 episodes to TFDS/RLDS."
+def parse_args(argv: list[str] | None = None):
+    config_path = selected_option(argv, "config", Path) or DEFAULT_RLDS_CONFIG
+    config = load_rlds_config(config_path)
+    args, _ = parse_options(
+        argv,
+        (
+            Option("config", converter=Path, default=config.source_path, help="RLDS YAML path"),
+            Option("lerobot_root", converter=Path, default=config.source_root),
+            Option("dataset_name", default=config.dataset_name),
+            Option("dataset_version", default=config.dataset_version),
+            Option("repo_id", default=config.repo_id),
+            Option("source_revision", default=config.source_revision),
+            Option("source_info_sha256", default=config.source_info_sha256),
+            Option("output_root", converter=Path, default=config.output_root),
+            Option("max_episodes", converter=int, default=config.max_episodes),
+            Option("val_fraction", converter=float, default=config.val_fraction),
+            Option("split_seed", converter=int, default=config.split_seed),
+            Option("instruction", default=config.instruction),
+        ),
+        description="Convert PiPER LeRobotDataset v3 episodes to TFDS/RLDS.",
     )
-    parser.add_argument("--lerobot-root", type=Path, default=DEFAULT_SOURCE_ROOT)
-    parser.add_argument("--dataset-name", default=DEFAULT_RLDS_DATASET_NAME)
-    parser.add_argument("--dataset-version", default=DEFAULT_RLDS_DATASET_VERSION)
-    parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
-    parser.add_argument(
-        "--source-revision",
-        default=DEFAULT_SOURCE_REVISION,
-        help="Hugging Face dataset commit represented by the local source snapshot.",
-    )
-    parser.add_argument("--source-info-sha256", default=DEFAULT_SOURCE_INFO_SHA256)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--max-episodes", type=int, default=DEFAULT_MAX_EPISODES)
-    parser.add_argument("--val-fraction", type=float, default=DEFAULT_VAL_FRACTION)
-    parser.add_argument("--split-seed", type=int, default=DEFAULT_SPLIT_SEED)
-    parser.add_argument(
-        "--instruction",
-        default=DEFAULT_INSTRUCTION,
-        help="Override every source task string. By default each recorded task is retained.",
-    )
-    return parser.parse_args()
+    return args
 
 
 def _sha256(path: Path) -> str:

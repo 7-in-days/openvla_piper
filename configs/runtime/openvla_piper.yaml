@@ -1,0 +1,30 @@
+schema_version: 1
+
+# LoRA adapter checkpoint and the base model loaded by the FastAPI server.
+server:
+  host: 127.0.0.1
+  port: 8777
+  checkpoint: artifacts/checkpoints/romalab-cbf/openvla_two_block_pnp
+  base_model: artifacts/models/openvla/openvla-7b
+  openvla_oft_repo: null
+  auth_token_env: PIPER_OPENVLA_SERVER_TOKEN
+  max_request_bytes: 8388608
+
+# Synchronous rollout client and existing vla_pipeline / piper_ws bridge.
+client:
+  model_server: http://127.0.0.1:8777
+  rosbridge_url: ws://localhost:9090
+  piper_repo: ~/vla_pipeline
+  task: pick up the green blocks one at a time and place them in the white box
+  max_actions: 500
+  health_timeout_s: 300.0
+  request_timeout_s: 30.0
+  inference_log_root: inference_logs
+  chunk_diagnostics: true
+
+# All three live gates are still required; this is the durable YAML gate.
+safety:
+  allow_live_motion: false
+  gripper_min_m: 0.0
+  gripper_max_m: 0.085
+  max_arm_step_delta_rad: 1.5

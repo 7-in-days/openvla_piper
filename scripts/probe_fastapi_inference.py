@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from pathlib import Path
@@ -16,36 +15,31 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from openvla_pipeline.cli import Option, parse_options, selected_option, usage_error
 from openvla_pipeline.config import load_runtime_config
 from openvla_pipeline.model_io import ACTION_KEYS, observation_to_request, validate_action_chunk
 from openvla_pipeline.piper_dry_run import request_json
 
 
 def main() -> None:
-    config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", type=Path)
-    selected, _ = config_parser.parse_known_args()
-    config = load_runtime_config(selected.config)
-
-    parser = argparse.ArgumentParser(
-        description="Run one synthetic image-pair inference through FastAPI (no ROS output)"
+    config = load_runtime_config(selected_option(None, "config", Path))
+    args, _ = parse_options(
+        None,
+        (
+            Option("config", converter=Path, default=config.source_path),
+            Option("server", default=config.client.model_server),
+            Option("checkpoint", converter=Path, default=Path(config.server.checkpoint) if config.server.checkpoint else None),
+            Option("task", default=config.client.task),
+            Option("timeout_s", converter=float, default=120.0),
+            Option("token_env", default=config.server.auth_token_env),
+            Option("image_size", converter=int, default=256),
+        ),
+        description="Run one synthetic image-pair inference through FastAPI (no ROS output)",
     )
-    parser.add_argument("--config", type=Path, default=config.source_path)
-    parser.add_argument("--server", default=config.client.model_server)
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=Path(config.server.checkpoint) if config.server.checkpoint else None,
-    )
-    parser.add_argument("--task", default=config.client.task)
-    parser.add_argument("--timeout-s", type=float, default=120.0)
-    parser.add_argument("--token-env", default=config.server.auth_token_env)
-    parser.add_argument("--image-size", type=int, default=256)
-    args = parser.parse_args()
     if args.checkpoint is None:
-        parser.error("--checkpoint is required")
+        usage_error("--checkpoint is required")
     if args.timeout_s <= 0 or args.image_size < 16:
-        parser.error("--timeout-s must be positive and --image-size must be at least 16")
+        usage_error("--timeout-s must be positive and --image-size must be at least 16")
 
     checkpoint = args.checkpoint.expanduser().resolve()
     metadata = json.loads((checkpoint / "checkpoint_metadata.json").read_text(encoding="utf-8"))

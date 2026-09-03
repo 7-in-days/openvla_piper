@@ -167,7 +167,7 @@ def main() -> None:
         os.environ.pop("PIPER_ACTION_CHUNK", None)
         os.environ.pop("ROBOT_PLATFORM", None)
 
-        # CLI > env > JSON config. JSON config also keeps live disabled.
+        # CLI > env > config. Legacy JSON input remains readable during migration.
         config_path = root / "runtime.json"
         config_path.write_text(json.dumps(config_payload(root)), encoding="utf-8")
         os.environ["PIPER_OPENVLA_TASK"] = "environment task"
@@ -335,7 +335,7 @@ def main() -> None:
     print("network_accessed=False")
     print("ros_connected=False")
     print("robot_output_published=False")
-    print("config_precedence=CLI>env>config>user_settings")
+    print("config_precedence=CLI>env>YAML")
     print("checkpoint_contract=chunk20,dim7,cameras2,bounds")
     print("logger_schema=3,core7,observability-separated,atomic-close")
     print("topic_contract=synced-frame,output,chunk,aggregated-chunk")

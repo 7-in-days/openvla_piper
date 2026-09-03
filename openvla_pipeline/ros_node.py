@@ -19,7 +19,7 @@ SYNC_HELP = """usage: python -m openvla_pipeline deploy [options]
 Synchronous OpenVLA-to-Piper ROS pipeline.
 
 options:
-  --config PATH          server/client/safety runtime JSON
+  --config PATH          server/client/safety runtime YAML
   --checkpoint PATH      checkpoint selected by the shell wrapper
   --action-chunk N       expected checkpoint chunk; mismatch is rejected
   --mode {dry-run,live}  dry-run reads observations without publishing actions

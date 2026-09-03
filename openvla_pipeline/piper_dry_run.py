@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -21,6 +20,7 @@ from openvla_pipeline.model_io import (
     observation_to_request,
     validate_action_chunk,
 )
+from openvla_pipeline.cli import Option, parse_options, selected_option, usage_error
 from openvla_pipeline.config import load_runtime_config
 from openvla_pipeline.piper_runtime import PiperModelContract
 
@@ -44,28 +44,28 @@ def request_json(url: str, payload: dict[str, Any] | None, token: str | None, ti
     return result
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", type=Path)
-    config_args, _ = config_parser.parse_known_args(argv)
-    config = load_runtime_config(config_args.config)
-
-    parser = argparse.ArgumentParser(description="Run the Piper bridge against the local OpenVLA policy server")
-    parser.add_argument("--config", type=Path, default=config.source_path)
-    parser.add_argument("--server", default=config.client.model_server)
-    parser.add_argument("--task", default=config.client.task)
-    parser.add_argument("--max-actions", type=int, default=config.client.max_actions)
-    parser.add_argument("--health-timeout-s", type=float, default=config.client.health_timeout_s)
-    parser.add_argument("--request-timeout-s", type=float, default=config.client.request_timeout_s)
-    parser.add_argument("--rosbridge-url", default=config.client.rosbridge_url)
-    parser.add_argument("--piper-repo", type=Path, default=config.client.piper_repo)
-    parser.add_argument("--live", action="store_true", help="publish actions; requires confirmation env var")
-    parser.add_argument("--token-env", default=config.server.auth_token_env)
-    args = parser.parse_args(argv)
+def parse_args(argv: list[str] | None = None):
+    config = load_runtime_config(selected_option(argv, "config", Path))
+    args, _ = parse_options(
+        argv,
+        (
+            Option("config", converter=Path, default=config.source_path),
+            Option("server", default=config.client.model_server),
+            Option("task", default=config.client.task),
+            Option("max_actions", converter=int, default=config.client.max_actions),
+            Option("health_timeout_s", converter=float, default=config.client.health_timeout_s),
+            Option("request_timeout_s", converter=float, default=config.client.request_timeout_s),
+            Option("rosbridge_url", default=config.client.rosbridge_url),
+            Option("piper_repo", converter=Path, default=config.client.piper_repo),
+            Option("live", switch=True, default=False, help="publish actions; requires confirmation env var"),
+            Option("token_env", default=config.server.auth_token_env),
+        ),
+        description="Run the Piper bridge against the local OpenVLA policy server",
+    )
     if args.max_actions < 1:
-        parser.error("--max-actions must be positive")
+        usage_error("--max-actions must be positive")
     if args.health_timeout_s <= 0 or args.request_timeout_s <= 0:
-        parser.error("request timeouts must be positive")
+        usage_error("request timeouts must be positive")
     return args
 
 

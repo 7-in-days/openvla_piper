@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from pathlib import Path
@@ -14,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
+from openvla_pipeline.cli import Option, parse_options, selected_option, usage_error
 from openvla_pipeline.config import load_runtime_config
 from openvla_pipeline.model_io import ContractError, request_to_observation
 from openvla_pipeline.openvla_policy import PiperOpenVLAPolicy
@@ -138,78 +138,43 @@ def create_app(
     return app
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    config_parser = argparse.ArgumentParser(add_help=False)
-    config_parser.add_argument("--config", type=Path)
-    config_args, _ = config_parser.parse_known_args(argv)
-    config = load_runtime_config(config_args.config)
-
-    parser = argparse.ArgumentParser(
-        description="Serve the LoRA-merged PiPER OpenVLA policy with FastAPI/Uvicorn"
-    )
-    parser.add_argument("--config", type=Path, default=config.source_path)
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=(
-            os.environ["PIPER_OPENVLA_CHECKPOINT"]
-            if os.environ.get("PIPER_OPENVLA_CHECKPOINT")
-            else config.server.checkpoint
+def parse_args(argv: list[str] | None = None):
+    config = load_runtime_config(selected_option(argv, "config", Path))
+    args, _ = parse_options(
+        argv,
+        (
+            Option("config", converter=Path, default=config.source_path),
+            Option(
+                "checkpoint",
+                default=os.environ.get("PIPER_OPENVLA_CHECKPOINT") or config.server.checkpoint,
+            ),
+            Option(
+                "base_model",
+                default=os.environ.get("OPENVLA_BASE_MODEL") or config.server.base_model,
+            ),
+            Option(
+                "openvla_oft_repo",
+                converter=Path,
+                default=(Path(os.environ["OPENVLA_OFT_REPO"]) if os.environ.get("OPENVLA_OFT_REPO") else config.server.openvla_oft_repo),
+            ),
+            Option("host", default=os.environ.get("PIPER_OPENVLA_SERVER_HOST", config.server.host)),
+            Option("port", converter=int, default=int(os.environ.get("PIPER_OPENVLA_SERVER_PORT", config.server.port))),
+            Option("auth_token_env", default=os.environ.get("PIPER_OPENVLA_AUTH_TOKEN_ENV", config.server.auth_token_env)),
+            Option("max_request_bytes", converter=int, default=int(os.environ.get("PIPER_OPENVLA_MAX_REQUEST_BYTES", config.server.max_request_bytes))),
+            Option(
+                "log_level",
+                choices=("critical", "error", "warning", "info", "debug", "trace"),
+                default=os.environ.get("PIPER_OPENVLA_LOG_LEVEL", "info"),
+            ),
         ),
+        description="Serve the LoRA-merged PiPER OpenVLA policy with FastAPI/Uvicorn",
     )
-    parser.add_argument(
-        "--base-model",
-        type=str,
-        default=(
-            os.environ["OPENVLA_BASE_MODEL"]
-            if os.environ.get("OPENVLA_BASE_MODEL")
-            else config.server.base_model
-        ),
-    )
-    parser.add_argument(
-        "--openvla-oft-repo",
-        type=Path,
-        default=(
-            Path(os.environ["OPENVLA_OFT_REPO"])
-            if os.environ.get("OPENVLA_OFT_REPO")
-            else config.server.openvla_oft_repo
-        ),
-    )
-    parser.add_argument(
-        "--host", default=os.environ.get("PIPER_OPENVLA_SERVER_HOST", config.server.host)
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("PIPER_OPENVLA_SERVER_PORT", config.server.port)),
-    )
-    parser.add_argument(
-        "--auth-token-env",
-        default=os.environ.get(
-            "PIPER_OPENVLA_AUTH_TOKEN_ENV", config.server.auth_token_env
-        ),
-    )
-    parser.add_argument(
-        "--max-request-bytes",
-        type=int,
-        default=int(
-            os.environ.get(
-                "PIPER_OPENVLA_MAX_REQUEST_BYTES", config.server.max_request_bytes
-            )
-        ),
-    )
-    parser.add_argument(
-        "--log-level",
-        choices=("critical", "error", "warning", "info", "debug", "trace"),
-        default=os.environ.get("PIPER_OPENVLA_LOG_LEVEL", "info"),
-    )
-    args = parser.parse_args(argv)
     if args.checkpoint is None:
-        parser.error(
+        usage_error(
             "--checkpoint is required (or set server.checkpoint / PIPER_OPENVLA_CHECKPOINT)"
         )
     if args.max_request_bytes <= 0:
-        parser.error("--max-request-bytes must be positive")
+        usage_error("--max-request-bytes must be positive")
     return args
 
 

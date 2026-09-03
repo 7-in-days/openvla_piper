@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from dataclasses import asdict, dataclass
 import json
 import os
@@ -8,14 +7,19 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from openvla_pipeline import user_settings
+from openvla_pipeline.cli import Option, parse_options
+from openvla_pipeline.yaml_config import (
+    ConfigDocumentError,
+    load_mapping,
+    require_exact_keys,
+    require_mapping,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_CONFIG_PATH = PROJECT_ROOT / "configs/runtime/openvla_piper.json"
-INSTALLED_CONFIG_PATH = Path(sys.prefix) / "share/openvla-piper/openvla_piper.json"
-USER_SETTINGS_PATH = Path(user_settings.__file__).resolve()
-DEFAULT_CONFIG_PATH = USER_SETTINGS_PATH
+SOURCE_CONFIG_PATH = PROJECT_ROOT / "configs/runtime/openvla_piper.yaml"
+INSTALLED_CONFIG_PATH = Path(sys.prefix) / "share/openvla-piper/openvla_piper.yaml"
+DEFAULT_CONFIG_PATH = SOURCE_CONFIG_PATH
 
 
 class RuntimeConfigError(ValueError):
@@ -67,13 +71,6 @@ class RuntimeConfig:
     source_path: Path
 
 
-def _require_mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
-    value = parent.get(key)
-    if not isinstance(value, dict):
-        raise RuntimeConfigError(f"runtime config field {key!r} must be an object")
-    return value
-
-
 def _expand_path(value: Any, field: str, *, allow_none: bool = False) -> Path | None:
     if value is None and allow_none:
         return None
@@ -93,10 +90,6 @@ def _positive_number(value: Any, field: str) -> float:
     return number
 
 
-def _path_text(value: Path | str | None) -> str | None:
-    return None if value is None else str(value)
-
-
 def _source_text(value: Any, field: str) -> str | None:
     if value is None:
         return None
@@ -111,65 +104,55 @@ def _source_text(value: Any, field: str) -> str | None:
     return str(expanded if expanded.is_absolute() else (PROJECT_ROOT / expanded).resolve())
 
 
-def _python_settings_payload() -> dict[str, Any]:
-    """Convert the user-editable Python constants to the validated config schema."""
-
-    return {
-        "schema_version": 1,
-        "server": {
-            "host": user_settings.SERVER_HOST,
-            "port": user_settings.SERVER_PORT,
-            "checkpoint": _path_text(user_settings.CHECKPOINT),
-            "base_model": _path_text(user_settings.BASE_MODEL),
-            "openvla_oft_repo": _path_text(user_settings.OPENVLA_OFT_REPO),
-            "auth_token_env": user_settings.AUTH_TOKEN_ENV,
-            "max_request_bytes": user_settings.MAX_REQUEST_BYTES,
-        },
-        "client": {
-            "model_server": user_settings.MODEL_SERVER_URL,
-            "rosbridge_url": user_settings.ROSBRIDGE_URL,
-            "piper_repo": _path_text(user_settings.PIPER_REPO),
-            "task": user_settings.TASK,
-            "max_actions": user_settings.MAX_ACTIONS,
-            "health_timeout_s": user_settings.HEALTH_TIMEOUT_S,
-            "request_timeout_s": user_settings.REQUEST_TIMEOUT_S,
-            "inference_log_root": _path_text(user_settings.INFERENCE_LOG_ROOT),
-            "chunk_diagnostics": user_settings.CHUNK_DIAGNOSTICS,
-        },
-        "safety": {
-            "allow_live_motion": user_settings.ALLOW_LIVE_MOTION,
-            "gripper_min_m": user_settings.GRIPPER_MIN_M,
-            "gripper_max_m": user_settings.GRIPPER_MAX_M,
-            "max_arm_step_delta_rad": user_settings.MAX_ARM_STEP_DELTA_RAD,
-        },
-    }
-
-
 def load_runtime_config(path: Path | str | None = None) -> RuntimeConfig:
     requested_path = path or os.environ.get("PIPER_OPENVLA_RUNTIME_CONFIG")
     selected = (
         Path(requested_path).expanduser().resolve()
         if requested_path is not None
-        else USER_SETTINGS_PATH
+        else (SOURCE_CONFIG_PATH if SOURCE_CONFIG_PATH.is_file() else INSTALLED_CONFIG_PATH)
     )
-    if selected == USER_SETTINGS_PATH:
-        raw = _python_settings_payload()
-    else:
-        try:
-            with selected.open("r", encoding="utf-8") as file:
-                raw = json.load(file)
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeConfigError(f"cannot load runtime config {selected}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise RuntimeConfigError("runtime config root must be an object")
+    try:
+        raw = load_mapping(selected)
+        require_exact_keys(
+            raw,
+            {"schema_version", "server", "client", "safety"},
+            where="runtime",
+        )
+    except ConfigDocumentError as exc:
+        raise RuntimeConfigError(str(exc)) from exc
     if raw.get("schema_version") != 1:
         raise RuntimeConfigError(
             f"unsupported runtime config schema_version: {raw.get('schema_version')!r}"
         )
 
-    server_raw = _require_mapping(raw, "server")
-    client_raw = _require_mapping(raw, "client")
-    safety_raw = _require_mapping(raw, "safety")
+    try:
+        server_raw = require_mapping(raw, "server", "runtime")
+        client_raw = require_mapping(raw, "client", "runtime")
+        safety_raw = require_mapping(raw, "safety", "runtime")
+        require_exact_keys(
+            server_raw,
+            {
+                "host", "port", "checkpoint", "base_model", "openvla_oft_repo",
+                "auth_token_env", "max_request_bytes",
+            },
+            where="runtime.server",
+        )
+        require_exact_keys(
+            client_raw,
+            {
+                "model_server", "rosbridge_url", "piper_repo", "task", "max_actions",
+                "health_timeout_s", "request_timeout_s", "inference_log_root",
+                "chunk_diagnostics",
+            },
+            where="runtime.client",
+        )
+        require_exact_keys(
+            safety_raw,
+            {"allow_live_motion", "gripper_min_m", "gripper_max_m", "max_arm_step_delta_rad"},
+            where="runtime.safety",
+        )
+    except ConfigDocumentError as exc:
+        raise RuntimeConfigError(str(exc)) from exc
 
     host = server_raw.get("host")
     if not isinstance(host, str) or not host.strip():
@@ -279,9 +262,11 @@ def _json_ready(config: RuntimeConfig) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Validate and print the OpenVLA-Piper runtime config")
-    parser.add_argument("--config", type=Path)
-    args = parser.parse_args(argv)
+    args, _ = parse_options(
+        argv,
+        (Option("config", converter=Path, help="runtime YAML or legacy JSON path"),),
+        description="Validate and print the OpenVLA-Piper runtime config",
+    )
     print(json.dumps(_json_ready(load_runtime_config(args.config)), indent=2, ensure_ascii=False))
 
 

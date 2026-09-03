@@ -26,6 +26,7 @@ tensorflow-datasets==4.9.3
 tensorflow-metadata==1.17.3
 tensorflow-graphics==2021.12.3
 roslibpy==1.8.1
+PyYAML==6.0.3
 # OpenVLA-OFT requires its bidirectional-attention fork and dlimp fork.
 transformers @ git+https://github.com/moojink/transformers-openvla-oft.git@bc339d9ad707454c0c115970db43c260067c61ab
 dlimp @ git+https://github.com/moojink/dlimp_openvla.git@040105d256bd28866cc6620621a3d5f7b6b91b46

@@ -1,0 +1,22 @@
+schema_version: 1
+
+source:
+  lerobot_root: /home/pc/vla_pipeline/episodes/two_block_pnp
+  repo_id: romalab-cbf/two_block_pnp
+  revision: 4e1a8ce8da637dca8b2f1437ec5e613186d3dd34
+  info_sha256: 8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9
+  instruction_override: null
+
+output:
+  root: artifacts/rlds
+  dataset_name: piper_bridge
+  dataset_version: 1.0.0
+
+split:
+  max_episodes: null
+  validation_fraction: 0.05
+  seed: 7
+
+verification:
+  expected_episode_frames: 700
+  openvla_oft_repo: null

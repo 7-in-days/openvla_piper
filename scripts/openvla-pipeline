@@ -5,15 +5,9 @@ script_path="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
 export PYTHONNOUSERSITE=1
 
-# ========================== DATASET USER SETTINGS ==========================
-# convert-rlds/verify-rlds의 기본 경로와 이름. 명령 뒤 CLI 옵션이 우선한다.
-LEROBOT_DATASET_ROOT="/home/pc/vla_pipeline/episodes/two_block_pnp"
-RLDS_DATASET_NAME="piper_bridge"
-RLDS_OUTPUT_ROOT="${project_root}/artifacts/rlds"
-HF_DATASET_REPO="romalab-cbf/two_block_pnp"
-HF_DATASET_REVISION="4e1a8ce8da637dca8b2f1437ec5e613186d3dd34"
-HF_DATASET_INFO_SHA256="8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9"
-# ===========================================================================
+runtime_config="${project_root}/configs/runtime/openvla_piper.yaml"
+rlds_config="${project_root}/configs/rlds/piper_bridge.yaml"
+training_config="${project_root}/configs/training/openvla_lora.yaml"
 
 runtime_python() {
   local runtime_prefix="${OPENVLA_CONDA_PREFIX:-}"
@@ -72,7 +66,7 @@ commands:
   convert-rlds   convert PiPER LeRobotDataset v3 episodes into TFDS/RLDS
   verify-rlds    verify raw RLDS and OpenVLA-OFT piper_bridge registration
   train-lora     run official OpenVLA-OFT synchronous LoRA fine-tuning
-  show-config   print resolved user/config settings
+  show-config    print resolved YAML/environment settings
   plan          resolve launch settings without server, ROS, or GPU access
   model-server  merge LoRA and start the synchronous FastAPI model server
   probe          run one ROS-free image-pair request against FastAPI
@@ -81,7 +75,7 @@ commands:
   smoke         run CPU-only synthetic contract tests
 
 checkpoint source: --checkpoint /local/dir or hf://OWNER/REPO@REVISION
-precedence: CLI > environment > JSON config > openvla_pipeline/user_settings.py
+precedence: CLI > environment > YAML config
 EOF
 }
 
@@ -101,13 +95,7 @@ case "${command}" in
       HF_HOME="${project_root}/.runtime/huggingface-rlds" \
       HF_DATASETS_CACHE="${project_root}/.runtime/huggingface-rlds/datasets" \
       "$(rlds_python)" scripts/convert_lerobot_to_rlds.py \
-      --lerobot-root "${LEROBOT_DATASET_ROOT}" \
-      --dataset-name "${RLDS_DATASET_NAME}" \
-      --repo-id "${HF_DATASET_REPO}" \
-      --source-revision "${HF_DATASET_REVISION}" \
-      --source-info-sha256 "${HF_DATASET_INFO_SHA256}" \
-      --output-root "${RLDS_OUTPUT_ROOT}" \
-      "$@"
+      --config "${rlds_config}" "$@"
     ;;
   verify-rlds)
     cd "${project_root}"
@@ -116,15 +104,16 @@ case "${command}" in
       TRANSFORMERS_CACHE="${project_root}/.runtime/huggingface-rlds/transformers" \
       ROBOT_PLATFORM=PIPER PIPER_ACTION_CHUNK="${PIPER_ACTION_CHUNK:-50}" \
       "$(runtime_python)" scripts/verify_rlds_dataset.py \
-      --data-root "${RLDS_OUTPUT_ROOT}" --dataset-name "${RLDS_DATASET_NAME}" "$@"
+      --config "${rlds_config}" "$@"
     ;;
   train-lora)
-    exec "${project_root}/scripts/train_openvla_lora.sh" "$@"
+    exec "${project_root}/scripts/train_openvla_lora.sh" \
+      --config "${training_config}" "$@"
     ;;
   show-config)
     cd "${project_root}"
     exec "$(runtime_python)" \
-      -m openvla_pipeline show-config "$@"
+      -m openvla_pipeline show-config --config "${runtime_config}" "$@"
     ;;
   plan)
     cd "${project_root}"
@@ -150,6 +139,8 @@ case "${command}" in
       "${test_python}" tests/cpu_only_smoke.py
     env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
       "${test_python}" tests/rlds_converter_smoke.py
+    env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
+      "${test_python}" tests/yaml_config_smoke.py
     exec env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
       "${test_python}" tests/fastapi_server_smoke.py
     ;;
