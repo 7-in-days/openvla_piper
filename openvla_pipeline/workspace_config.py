@@ -88,6 +88,48 @@ def _float(value: Any, field: str, *, minimum: float = 0.0) -> float:
 
 
 @dataclass(frozen=True)
+class ImageCrop:
+    top: int
+    left: int
+    height: int
+    width: int
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return (self.height, self.width, 3)
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "top": self.top,
+            "left": self.left,
+            "height": self.height,
+            "width": self.width,
+        }
+
+
+def _image_crop(value: Any, field: str) -> ImageCrop | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise WorkspaceConfigError(f"{field} must be null or a mapping")
+    try:
+        require_exact_keys(value, {"top", "left", "height", "width"}, where=field)
+    except ConfigDocumentError as exc:
+        raise WorkspaceConfigError(str(exc)) from exc
+    crop = ImageCrop(
+        top=_int(value["top"], f"{field}.top", minimum=0),
+        left=_int(value["left"], f"{field}.left", minimum=0),
+        height=_int(value["height"], f"{field}.height"),
+        width=_int(value["width"], f"{field}.width"),
+    )
+    if crop.top + crop.height > 480 or crop.left + crop.width > 640:
+        raise WorkspaceConfigError(
+            f"{field} escapes the 480x640 source image: {crop.as_dict()}"
+        )
+    return crop
+
+
+@dataclass(frozen=True)
 class RldsConfig:
     source_root: Path
     repo_id: str
@@ -100,6 +142,8 @@ class RldsConfig:
     val_fraction: float
     split_seed: int
     instruction: str | None
+    image_encoding: str
+    image_crops: dict[str, ImageCrop | None]
     expected_episode_frames: int | None
     openvla_oft_repo: Path | None
     source_path: Path
@@ -107,7 +151,7 @@ class RldsConfig:
 
 def load_rlds_config(path: Path | str | None = None) -> RldsConfig:
     selected = Path(path or DEFAULT_RLDS_CONFIG).expanduser().resolve()
-    raw = _load(selected, {"source", "output", "split", "verification"}, "rlds")
+    raw = _load(selected, {"source", "output", "split", "images", "verification"}, "rlds")
     source = _section(
         raw,
         "source",
@@ -116,6 +160,10 @@ def load_rlds_config(path: Path | str | None = None) -> RldsConfig:
     )
     output = _section(raw, "output", {"root", "dataset_name", "dataset_version"}, "rlds")
     split = _section(raw, "split", {"max_episodes", "validation_fraction", "seed"}, "rlds")
+    images = _section(raw, "images", {"encoding", "crops"}, "rlds")
+    crops = _section(
+        images, "crops", {"third_person", "wrist"}, "rlds.images"
+    )
     verification = _section(
         raw, "verification", {"expected_episode_frames", "openvla_oft_repo"}, "rlds"
     )
@@ -140,6 +188,9 @@ def load_rlds_config(path: Path | str | None = None) -> RldsConfig:
     val_fraction = _float(split["validation_fraction"], "rlds.split.validation_fraction")
     if val_fraction >= 1.0:
         raise WorkspaceConfigError("rlds.split.validation_fraction must be < 1")
+    image_encoding = _text(images["encoding"], "rlds.images.encoding")
+    if image_encoding not in {"jpeg", "png"}:
+        raise WorkspaceConfigError("rlds.images.encoding must be jpeg or png")
     return RldsConfig(
         source_root=_path(source["lerobot_root"], "rlds.source.lerobot_root"),  # type: ignore[arg-type]
         repo_id=_text(source["repo_id"], "rlds.source.repo_id"),  # type: ignore[arg-type]
@@ -156,6 +207,11 @@ def load_rlds_config(path: Path | str | None = None) -> RldsConfig:
             "rlds.source.instruction_override",
             optional=True,
         ),
+        image_encoding=image_encoding,
+        image_crops={
+            name: _image_crop(crops[name], f"rlds.images.crops.{name}")
+            for name in ("third_person", "wrist")
+        },
         expected_episode_frames=expected,
         openvla_oft_repo=_path(
             verification["openvla_oft_repo"],

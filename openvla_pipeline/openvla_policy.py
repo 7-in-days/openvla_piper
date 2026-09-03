@@ -47,6 +47,7 @@ class PiperOpenVLAPolicy:
         self.image_augmentation = bool(contract["image_aug"])
         self.robot_contract = contract["robot_contract"]
         self.image_keys = tuple(self.robot_contract["camera_names"])
+        self.image_preprocessing = self._parse_image_preprocessing(self.robot_contract)
         self.unnorm_key = str(self.robot_contract["robot_type"])
         self._configure_oft_environment()
         recorded_base = str(self._metadata["base_vla_path"])
@@ -70,6 +71,71 @@ class PiperOpenVLAPolicy:
             base_model=str(self.base_model),
         )
         self._load_model()
+
+    @staticmethod
+    def _parse_image_preprocessing(robot_contract: dict[str, Any]) -> dict[str, Any] | None:
+        preprocessing = robot_contract.get("image_preprocessing")
+        if preprocessing is None:
+            return None
+        if not isinstance(preprocessing, dict):
+            raise ContractError("image_preprocessing must be an object")
+        if set(preprocessing) != {"source_shape", "encoding", "crops", "output_shapes"}:
+            raise ContractError("image_preprocessing fields are invalid")
+        source_shape = preprocessing["source_shape"]
+        if source_shape != [480, 640, 3]:
+            raise ContractError(
+                f"unsupported image_preprocessing source_shape: {source_shape!r}"
+            )
+        if preprocessing["encoding"] not in {"jpeg", "png"}:
+            raise ContractError("image_preprocessing encoding must be jpeg or png")
+        camera_names = tuple(robot_contract["camera_names"])
+        crops = preprocessing["crops"]
+        output_shapes = preprocessing["output_shapes"]
+        if not isinstance(crops, dict) or set(crops) != set(camera_names):
+            raise ContractError("image_preprocessing crops do not match camera_names")
+        if not isinstance(output_shapes, dict) or set(output_shapes) != set(camera_names):
+            raise ContractError("image_preprocessing output_shapes do not match camera_names")
+        for camera_name in camera_names:
+            crop = crops[camera_name]
+            if crop is None:
+                expected_shape = source_shape
+            else:
+                if not isinstance(crop, dict) or set(crop) != {"top", "left", "height", "width"}:
+                    raise ContractError(f"invalid {camera_name} image crop")
+                values = tuple(crop[key] for key in ("top", "left", "height", "width"))
+                if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+                    raise ContractError(f"non-integer {camera_name} image crop")
+                top, left, height, width = values
+                if top < 0 or left < 0 or height < 1 or width < 1:
+                    raise ContractError(f"invalid {camera_name} image crop bounds")
+                if top + height > source_shape[0] or left + width > source_shape[1]:
+                    raise ContractError(f"{camera_name} image crop escapes source image")
+                expected_shape = [height, width, 3]
+            if output_shapes[camera_name] != expected_shape:
+                raise ContractError(f"{camera_name} image output shape disagrees with crop")
+        return preprocessing
+
+    def _prepare_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        prepared = dict(observation)
+        prepared["state"] = np.asarray(observation["state"], dtype=np.float32).copy()
+        if self.image_preprocessing is None:
+            return prepared
+        transport_names = {"third_person": "full_image", "wrist": "wrist_image"}
+        source_shape = tuple(self.image_preprocessing["source_shape"])
+        for camera_name in self.image_keys:
+            transport_name = transport_names[camera_name]
+            image = np.asarray(observation[transport_name])
+            if image.shape != source_shape or image.dtype != np.uint8:
+                raise ContractError(
+                    f"{camera_name} must be uint8 shape {source_shape} before trained crop, "
+                    f"got shape={image.shape} dtype={image.dtype}"
+                )
+            crop = self.image_preprocessing["crops"][camera_name]
+            if crop is not None:
+                top, left = crop["top"], crop["left"]
+                image = image[top:top + crop["height"], left:left + crop["width"], :]
+            prepared[transport_name] = np.ascontiguousarray(image)
+        return prepared
 
     @staticmethod
     def _log_load_event(event: str, **fields: Any) -> None:
@@ -392,13 +458,14 @@ class PiperOpenVLAPolicy:
 
     def predict(self, observation: dict[str, Any], task: str) -> dict[str, Any]:
         state = np.asarray(observation["state"], dtype=np.float32).copy()
+        model_observation = self._prepare_observation(observation)
         started = time.perf_counter()
         with self._lock:
             actions = self._get_vla_action(
                 self._cfg,
                 self._vla,
                 self._processor,
-                observation,
+                model_observation,
                 task,
                 self._action_head,
                 self._proprio_projector,
@@ -436,6 +503,7 @@ class PiperOpenVLAPolicy:
             "normalization": self.normalization,
             "unnorm_key": self.unnorm_key,
             "camera_names": list(self.image_keys),
+            "image_preprocessing": self.image_preprocessing,
             "robot_contract": self.robot_contract,
             "resolved_oft_contract": self._resolved_oft_contract,
             "tensorflow_visible_gpus": [],

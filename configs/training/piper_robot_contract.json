@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "robot": "piper",
+  "robot_type": "piper_bridge",
   "control_hz": 20.0,
   "action_encoding": "absolute_joint_position",
   "action_names": [
@@ -12,7 +12,7 @@
     "joint_6.pos",
     "gripper.pos"
   ],
-  "action_units": ["rad", "rad", "rad", "rad", "rad", "rad", "m"],
+  "action_units": ["radian", "radian", "radian", "radian", "radian", "radian", "meter"],
   "state_names": [
     "joint_1.pos",
     "joint_2.pos",
@@ -22,6 +22,7 @@
     "joint_6.pos",
     "gripper.pos"
   ],
-  "state_units": ["rad", "rad", "rad", "rad", "rad", "rad", "m"],
-  "camera_names": ["third_person", "wrist"]
+  "state_units": ["radian", "radian", "radian", "radian", "radian", "radian", "meter"],
+  "camera_names": ["third_person", "wrist"],
+  "command_names": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"]
 }

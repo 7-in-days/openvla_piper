@@ -56,7 +56,7 @@ Pi0 워크스페이스와 같은 방식으로 지속 설정은 역할별 YAML �
 | 설정 파일 | 바꾸는 값 |
 |---|---|
 | `configs/runtime/openvla_piper.yaml` | checkpoint/base model, FastAPI, rosbridge, task, rollout 길이, 로그, live gate |
-| `configs/rlds/piper_bridge.yaml` | LeRobot 원본, HF revision/hash, RLDS 이름·출력·split, episode 검증 |
+| `configs/rlds/piper_bridge.yaml` | LeRobot 원본, HF revision/hash, RLDS 이름·출력·split, JPEG/PNG·카메라별 crop, episode 검증 |
 | `configs/training/openvla_lora.yaml` | RLDS/base/run 경로, action horizon, LoRA, optimizer, validation, W&B |
 
 세 YAML은 중복 key, 알 수 없는 key, 누락 key, schema version, 타입과 범위를 시작 전에 엄격히
@@ -108,6 +108,24 @@ scripts/openvla-pipeline install-rlds
 `val`, 나머지 950개는 `train`으로 episode 단위 분리한다. 원본 35초/700-frame episode를
 25초로 자르거나 frame 단위로 섞지 않는다. 출력 경로가 이미 있으면 덮어쓰지 않고 중단한다.
 
+RLDS 이미지 코덱과 영구 ROI crop은 같은 YAML에서 지정한다. TFDS는 선택한 코덱의 바이트를
+TFRecord 내부에 저장한다. `jpeg`가 기본이고 `png`도 지원한다. 원본 LeRobot 영상 자체가
+AV1 손실 압축이므로 PNG가 원본 디테일을 복원하지는 않지만, RLDS 생성 과정의 추가 JPEG 손실은
+피할 수 있다. crop은 카메라별로 독립적이며 `null`이면 전체 `480x640` 화면을 보존한다.
+
+```yaml
+images:
+  encoding: png  # jpeg | png
+  crops:
+    third_person: {top: 60, left: 80, height: 360, width: 480}
+    wrist: null
+```
+
+코덱이나 crop을 바꾸면 기존 결과를 덮어쓰지 않도록 `output.dataset_version` 또는
+`output.root`도 바꿔야 한다. 변환기는 source shape, 코덱, crop, 카메라별 output shape를
+`conversion_manifest.json`에 기록하고 검증기는 YAML, manifest, TFDS feature 및 실제 decoded
+frame이 모두 일치하는지 검사한다.
+
 ```bash
 cd /home/pc/openvla_piper
 scripts/openvla-pipeline convert-rlds
@@ -153,7 +171,12 @@ scripts/openvla-pipeline train-lora \
 save frequency 10000으로 설정돼 있다. 기본 W&B 모드는 `offline`이며, 온라인 기록이 필요할
 때만 `--wandb-mode online`을 사용한다.
 학습 checkpoint에는 action/state/camera/control-Hz와 원본 LeRobot schema hash를 함께 저장하므로
-다른 robot/action contract로 잘못 재개하는 것을 막는다.
+다른 robot/action contract로 잘못 재개하는 것을 막는다. 또한 RLDS manifest의 이미지 전처리
+계약을 checkpoint metadata에 포함한다. 영구 ROI crop으로 학습한 새 checkpoint를 FastAPI에서
+불러오면 서버가 rosbridge에서 받은 원본 `480x640` 영상에 동일한 카메라별 crop을 먼저 적용한다.
+그 다음 `image_aug=true` checkpoint는 OpenVLA-OFT 정석대로 학습 시 0.9 random-resized crop,
+추론 시 0.9 center crop을 적용한다. 기존 checkpoint에는 전처리 계약이 없으므로 이전과 동일하게
+영구 ROI crop 없이 동작한다.
 
 공식 레퍼런스는
 [LeRobotDataset v3](https://github.com/huggingface/lerobot/blob/main/docs/source/lerobot-dataset-v3.mdx),

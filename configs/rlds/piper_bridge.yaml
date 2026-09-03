@@ -17,6 +17,14 @@ split:
   validation_fraction: 0.05
   seed: 7
 
+# TFRecord 내부 이미지 코덱. crop은 null이면 원본 480x640 전체 화면을 보존한다.
+# ROI 예시: {top: 60, left: 80, height: 360, width: 480}
+images:
+  encoding: jpeg
+  crops:
+    third_person: null
+    wrist: null
+
 verification:
   expected_episode_frames: 700
   openvla_oft_repo: null

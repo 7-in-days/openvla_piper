@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import sys
 import tempfile
 
+import numpy as np
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -141,6 +143,33 @@ def main() -> None:
         policy.checkpoint = local_source
         policy._metadata = policy._load_and_validate_metadata()
         contract = policy._metadata["training_contract"]
+        preprocessing = {
+            "source_shape": [480, 640, 3],
+            "encoding": "png",
+            "crops": {
+                "third_person": {"top": 60, "left": 80, "height": 360, "width": 480},
+                "wrist": None,
+            },
+            "output_shapes": {
+                "third_person": [360, 480, 3],
+                "wrist": [480, 640, 3],
+            },
+        }
+        crop_contract = dict(contract["robot_contract"])
+        crop_contract["image_preprocessing"] = preprocessing
+        policy.image_keys = ("third_person", "wrist")
+        policy.image_preprocessing = policy._parse_image_preprocessing(crop_contract)
+        source_image = np.arange(480 * 640 * 3, dtype=np.uint8).reshape(480, 640, 3)
+        prepared = policy._prepare_observation(
+            {
+                "state": np.zeros(7, dtype=np.float32),
+                "full_image": source_image,
+                "wrist_image": source_image,
+            }
+        )
+        assert prepared["full_image"].shape == (360, 480, 3)
+        assert prepared["wrist_image"].shape == (480, 640, 3)
+        assert np.array_equal(prepared["full_image"][0, 0], source_image[60, 80])
         policy.action_chunk = int(contract["num_actions_chunk"])
         policy.action_dim = int(contract["action_dim"])
         policy.normalization = str(contract["normalization"])

@@ -17,7 +17,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from openvla_pipeline.cli import Option, parse_options, selected_option
-from openvla_pipeline.workspace_config import DEFAULT_RLDS_CONFIG, load_rlds_config
+from openvla_pipeline.workspace_config import (
+    DEFAULT_RLDS_CONFIG,
+    ImageCrop,
+    load_rlds_config,
+)
 
 EXPECTED_VECTOR_NAMES = [
     "joint_1.pos",
@@ -52,9 +56,16 @@ def parse_args(argv: list[str] | None = None):
             Option("val_fraction", converter=float, default=config.val_fraction),
             Option("split_seed", converter=int, default=config.split_seed),
             Option("instruction", default=config.instruction),
+            Option(
+                "image_encoding",
+                default=config.image_encoding,
+                choices=("jpeg", "png"),
+                help="TFRecord image encoding; crop regions come from the YAML",
+            ),
         ),
         description="Convert PiPER LeRobotDataset v3 episodes to TFDS/RLDS.",
     )
+    args.image_crops = config.image_crops
     return args
 
 
@@ -109,6 +120,22 @@ def _to_uint8_hwc(value: Any, key: str) -> np.ndarray:
     return np.ascontiguousarray(image)
 
 
+def _crop_image(image: np.ndarray, crop: ImageCrop | None, key: str) -> np.ndarray:
+    if crop is None:
+        return image
+    bottom = crop.top + crop.height
+    right = crop.left + crop.width
+    if bottom > image.shape[0] or right > image.shape[1]:
+        raise ValueError(
+            f"{key} crop {crop.as_dict()} escapes image shape {image.shape}"
+        )
+    return np.ascontiguousarray(image[crop.top:bottom, crop.left:right, :])
+
+
+def _output_image_shape(crop: ImageCrop | None) -> tuple[int, int, int]:
+    return crop.shape if crop is not None else (480, 640, 3)
+
+
 def _to_vector(value: Any, key: str) -> np.ndarray:
     if hasattr(value, "detach"):
         value = value.detach().cpu().numpy()
@@ -123,16 +150,24 @@ def _to_vector(value: Any, key: str) -> np.ndarray:
 
 
 def make_rlds_step(
-    item: dict[str, Any], frame_offset: int, episode_length: int, instruction: str | None
+    item: dict[str, Any],
+    frame_offset: int,
+    episode_length: int,
+    instruction: str | None,
+    image_crops: dict[str, ImageCrop | None] | None = None,
 ) -> dict[str, Any]:
     is_last = frame_offset == episode_length - 1
     task = instruction if instruction is not None else str(item["task"])
     if not task.strip():
         raise ValueError("language instruction is empty")
+    crops = image_crops or {"third_person": None, "wrist": None}
     return {
         "observation": {
-            "third_person": _to_uint8_hwc(item[IMAGE_KEYS["third_person"]], "third_person"),
-            "wrist": _to_uint8_hwc(item[IMAGE_KEYS["wrist"]], "wrist"),
+            name: _crop_image(
+                _to_uint8_hwc(item[source_key], name), crops.get(name), name
+            )
+            for name, source_key in IMAGE_KEYS.items()
+        } | {
             "state": _to_vector(item["observation.state"], "observation.state"),
         },
         "action": _to_vector(item["action"], "action"),
@@ -196,6 +231,9 @@ def main() -> int:
     train_episodes, val_episodes = _select_splits(
         int(source_info["total_episodes"]), args.max_episodes, args.val_fraction, args.split_seed
     )
+    output_image_shapes = {
+        name: _output_image_shape(args.image_crops[name]) for name in IMAGE_KEYS
+    }
 
     class PiperBridge(tfds.core.GeneratorBasedBuilder):
         name = rlds_dataset_name
@@ -213,14 +251,14 @@ def main() -> int:
                                 "observation": tfds.features.FeaturesDict(
                                     {
                                         "third_person": tfds.features.Image(
-                                            shape=(480, 640, 3),
+                                            shape=output_image_shapes["third_person"],
                                             dtype=np.uint8,
-                                            encoding_format="jpeg",
+                                            encoding_format=args.image_encoding,
                                         ),
                                         "wrist": tfds.features.Image(
-                                            shape=(480, 640, 3),
+                                            shape=output_image_shapes["wrist"],
                                             dtype=np.uint8,
-                                            encoding_format="jpeg",
+                                            encoding_format=args.image_encoding,
                                         ),
                                         "state": tfds.features.Tensor(shape=(7,), dtype=np.float32),
                                     }
@@ -268,7 +306,13 @@ def main() -> int:
                         f"episode {episode_index} range {start}:{stop} disagrees with length {length}"
                     )
                 steps = [
-                    make_rlds_step(dataset[index], index - start, length, args.instruction)
+                    make_rlds_step(
+                        dataset[index],
+                        index - start,
+                        length,
+                        args.instruction,
+                        args.image_crops,
+                    )
                     for index in range(start, stop)
                 ]
                 yield str(episode_index), {
@@ -299,6 +343,17 @@ def main() -> int:
         "val_episode_indices": val_episodes,
         "total_episodes": len(train_episodes) + len(val_episodes),
         "instruction_override": args.instruction,
+        "image_preprocessing": {
+            "source_shape": [480, 640, 3],
+            "encoding": args.image_encoding,
+            "crops": {
+                name: crop.as_dict() if crop is not None else None
+                for name, crop in args.image_crops.items()
+            },
+            "output_shapes": {
+                name: list(shape) for name, shape in output_image_shapes.items()
+            },
+        },
     }
     manifest_path = final_dir / "conversion_manifest.json"
     temporary = manifest_path.with_suffix(".json.tmp")
@@ -311,7 +366,8 @@ def main() -> int:
     print(
         "rlds_conversion=complete "
         f"path={loaded.data_dir} train_episodes={len(train_episodes)} "
-        f"val_episodes={len(val_episodes)}"
+        f"val_episodes={len(val_episodes)} image_encoding={args.image_encoding} "
+        f"image_shapes={output_image_shapes}"
     )
     return 0
 

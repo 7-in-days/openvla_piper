@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
+import json
 import os
 from pathlib import Path
 import shlex
@@ -94,6 +96,58 @@ def _require_file(path: Path, error: str) -> None:
         raise FileNotFoundError(f"{error} path={path}")
 
 
+def _materialize_robot_contract(config: TrainingConfig) -> Path:
+    """Bind the immutable RLDS image transform to each newly trained checkpoint."""
+    _require_file(config.robot_contract, "robot_contract_missing")
+    manifest_path = (
+        config.data_root
+        / config.dataset_name
+        / config.dataset_version
+        / "conversion_manifest.json"
+    )
+    _require_file(manifest_path, "rlds_conversion_manifest_missing")
+    with manifest_path.open("r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if manifest.get("dataset_name") != config.dataset_name:
+        raise ValueError("RLDS manifest dataset_name does not match training config")
+    if manifest.get("dataset_version") != config.dataset_version:
+        raise ValueError("RLDS manifest dataset_version does not match training config")
+    image_preprocessing = manifest.get("image_preprocessing")
+    if not isinstance(image_preprocessing, dict):
+        raise ValueError(
+            "RLDS manifest has no image_preprocessing contract; reconvert the dataset"
+        )
+
+    with config.robot_contract.open("r", encoding="utf-8") as stream:
+        robot_contract = json.load(stream)
+    camera_names = robot_contract.get("camera_names")
+    crops = image_preprocessing.get("crops")
+    output_shapes = image_preprocessing.get("output_shapes")
+    if (
+        not isinstance(camera_names, list)
+        or not isinstance(crops, dict)
+        or not isinstance(output_shapes, dict)
+    ):
+        raise ValueError("invalid robot or RLDS image preprocessing contract")
+    if set(crops) != set(camera_names) or set(output_shapes) != set(camera_names):
+        raise ValueError("RLDS image preprocessing camera names do not match robot contract")
+    robot_contract["image_preprocessing"] = image_preprocessing
+    from openvla_pipeline.openvla_policy import PiperOpenVLAPolicy
+
+    PiperOpenVLAPolicy._parse_image_preprocessing(robot_contract)
+
+    canonical = json.dumps(robot_contract, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    contract_dir = config.run_root / ".contracts"
+    contract_dir.mkdir(parents=True, exist_ok=True)
+    output_path = contract_dir / f"{config.dataset_name}-{config.dataset_version}-{digest}.json"
+    if not output_path.is_file():
+        temporary = output_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(robot_contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, output_path)
+    return output_path
+
+
 def build_command(config: TrainingConfig) -> tuple[list[str], dict[str, str]]:
     runtime_prefix = os.environ.get("OPENVLA_CONDA_PREFIX") or _pointer(".install-prefix")
     oft_text = os.environ.get("OPENVLA_OFT_REPO") or _pointer(".openvla-oft-repo")
@@ -174,8 +228,9 @@ def build_command(config: TrainingConfig) -> tuple[list[str], dict[str, str]]:
 
 def main() -> int:
     config, dry_run = parse_settings()
-    command, environment = build_command(config)
     config.run_root.mkdir(parents=True, exist_ok=True)
+    config = replace(config, robot_contract=_materialize_robot_contract(config))
+    command, environment = build_command(config)
     Path(environment["HF_HOME"]).mkdir(parents=True, exist_ok=True)
     print(
         "training_contract=ready "

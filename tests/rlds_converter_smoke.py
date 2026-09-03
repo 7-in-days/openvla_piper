@@ -33,9 +33,24 @@ assert first["action"].shape == (7,)
 assert first["is_first"] and not first["is_last"] and not first["is_terminal"]
 assert last["is_last"] and last["is_terminal"] and last["reward"] == np.float32(1.0)
 
+crop = module.ImageCrop(top=60, left=80, height=360, width=480)
+cropped = module.make_rlds_step(
+    item,
+    0,
+    700,
+    None,
+    {"third_person": crop, "wrist": None},
+)
+assert cropped["observation"]["third_person"].shape == (360, 480, 3)
+assert cropped["observation"]["wrist"].shape == (480, 640, 3)
+assert cropped["observation"]["third_person"].flags.c_contiguous
+
 train, val = module._select_splits(1000, None, 0.05, 7)
 assert len(train) == 950 and len(val) == 50
 assert not set(train).intersection(val)
 assert sorted(train + val) == list(range(1000))
 
-print("rlds_converter_contract=PASS frames_per_episode_preserved=700 train=950 val=50")
+print(
+    "rlds_converter_contract=PASS codecs=jpeg,png crop=per_camera "
+    "frames_per_episode_preserved=700 train=950 val=50"
+)

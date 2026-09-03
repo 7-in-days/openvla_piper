@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -31,10 +32,16 @@ def parse_args(argv: list[str] | None = None):
                 converter=int,
                 default=config.expected_episode_frames,
             ),
+            Option(
+                "image_encoding",
+                default=config.image_encoding,
+                choices=("jpeg", "png"),
+            ),
             Option("openvla_oft_repo", converter=Path, default=config.openvla_oft_repo),
         ),
         description="Verify raw RLDS and OpenVLA-OFT PiPER registration.",
     )
+    args.image_crops = config.image_crops
     return args
 
 
@@ -42,6 +49,38 @@ def main() -> int:
     args = parse_args()
     data_root = args.data_root.expanduser().resolve()
     builder = tfds.builder(args.dataset_name, data_dir=data_root)
+    manifest_path = Path(builder.data_dir) / "conversion_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"conversion manifest is missing: {manifest_path}")
+    with manifest_path.open("r", encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    expected_preprocessing = {
+        "source_shape": [480, 640, 3],
+        "encoding": args.image_encoding,
+        "crops": {
+            name: crop.as_dict() if crop is not None else None
+            for name, crop in args.image_crops.items()
+        },
+        "output_shapes": {
+            name: list(crop.shape if crop is not None else (480, 640, 3))
+            for name, crop in args.image_crops.items()
+        },
+    }
+    if manifest.get("image_preprocessing") != expected_preprocessing:
+        raise ValueError(
+            "RLDS image preprocessing does not match config: "
+            f"actual={manifest.get('image_preprocessing')!r} "
+            f"expected={expected_preprocessing!r}"
+        )
+    observation_features = builder.info.features["steps"].feature["observation"]
+    for camera_name, expected_shape in expected_preprocessing["output_shapes"].items():
+        feature = observation_features[camera_name]
+        if feature.encoding_format != args.image_encoding:
+            raise ValueError(
+                f"{camera_name} encoding mismatch: {feature.encoding_format}"
+            )
+        if tuple(feature.shape) != tuple(expected_shape):
+            raise ValueError(f"{camera_name} TFDS feature shape mismatch: {feature.shape}")
     split_names = set(builder.info.splits)
     if "train" not in split_names:
         raise ValueError(f"missing train split: {sorted(split_names)}")
@@ -60,10 +99,9 @@ def main() -> int:
 
     for index in {0, len(steps) - 1}:
         step = steps[index]
-        if step["observation"]["third_person"].shape != (480, 640, 3):
-            raise ValueError("third_person image shape mismatch")
-        if step["observation"]["wrist"].shape != (480, 640, 3):
-            raise ValueError("wrist image shape mismatch")
+        for camera_name, expected_shape in expected_preprocessing["output_shapes"].items():
+            if step["observation"][camera_name].shape != tuple(expected_shape):
+                raise ValueError(f"{camera_name} image shape mismatch")
         for key, vector in (
             ("state", step["observation"]["state"]),
             ("action", step["action"]),
@@ -111,7 +149,8 @@ def main() -> int:
     print(
         "rlds_contract=PASS "
         f"dataset={args.dataset_name} train_episodes={builder.info.splits['train'].num_examples} "
-        f"first_episode_frames={len(steps)} openvla_registration=PASS"
+        f"first_episode_frames={len(steps)} image_encoding={args.image_encoding} "
+        f"image_shapes={expected_preprocessing['output_shapes']} openvla_registration=PASS"
     )
     return 0
 
