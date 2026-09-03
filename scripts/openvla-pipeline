@@ -5,6 +5,16 @@ script_path="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
 export PYTHONNOUSERSITE=1
 
+# ========================== DATASET USER SETTINGS ==========================
+# convert-rlds/verify-rlds의 기본 경로와 이름. 명령 뒤 CLI 옵션이 우선한다.
+LEROBOT_DATASET_ROOT="/home/pc/vla_pipeline/episodes/two_block_pnp"
+RLDS_DATASET_NAME="piper_bridge"
+RLDS_OUTPUT_ROOT="${project_root}/artifacts/rlds"
+HF_DATASET_REPO="romalab-cbf/two_block_pnp"
+HF_DATASET_REVISION="4e1a8ce8da637dca8b2f1437ec5e613186d3dd34"
+HF_DATASET_INFO_SHA256="8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9"
+# ===========================================================================
+
 runtime_python() {
   local runtime_prefix="${OPENVLA_CONDA_PREFIX:-}"
   if [[ -z "${runtime_prefix}" && -r "${project_root}/.install-prefix" ]]; then
@@ -91,11 +101,12 @@ case "${command}" in
       HF_HOME="${project_root}/.runtime/huggingface-rlds" \
       HF_DATASETS_CACHE="${project_root}/.runtime/huggingface-rlds/datasets" \
       "$(rlds_python)" scripts/convert_lerobot_to_rlds.py \
-      --lerobot-root /home/pc/vla_pipeline/episodes/two_block_pnp \
-      --repo-id romalab-cbf/two_block_pnp \
-      --source-revision 4e1a8ce8da637dca8b2f1437ec5e613186d3dd34 \
-      --source-info-sha256 8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9 \
-      --output-root "${project_root}/artifacts/rlds" \
+      --lerobot-root "${LEROBOT_DATASET_ROOT}" \
+      --dataset-name "${RLDS_DATASET_NAME}" \
+      --repo-id "${HF_DATASET_REPO}" \
+      --source-revision "${HF_DATASET_REVISION}" \
+      --source-info-sha256 "${HF_DATASET_INFO_SHA256}" \
+      --output-root "${RLDS_OUTPUT_ROOT}" \
       "$@"
     ;;
   verify-rlds)
@@ -105,7 +116,7 @@ case "${command}" in
       TRANSFORMERS_CACHE="${project_root}/.runtime/huggingface-rlds/transformers" \
       ROBOT_PLATFORM=PIPER PIPER_ACTION_CHUNK="${PIPER_ACTION_CHUNK:-50}" \
       "$(runtime_python)" scripts/verify_rlds_dataset.py \
-      --data-root "${project_root}/artifacts/rlds" "$@"
+      --data-root "${RLDS_OUTPUT_ROOT}" --dataset-name "${RLDS_DATASET_NAME}" "$@"
     ;;
   train-lora)
     exec "${project_root}/scripts/train_openvla_lora.sh" "$@"

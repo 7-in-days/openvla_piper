@@ -67,6 +67,17 @@ TFDS/RLDS로 변환한 다음 RLDS loader로 fine-tuning하는 방식이다. 따
 변환 전용 환경은 LeRobot 환경을 읽기 전용으로 상속하고 TensorFlow/TFDS만 프로젝트 내부에
 설치한다.
 
+`vla_pipeline`과 같은 방식으로 기본값을 코드 상단에서 바꿀 수 있다.
+
+- 변환/Hugging Face 경로·repo·RLDS 이름: `scripts/openvla-pipeline`의
+  `DATASET USER SETTINGS`
+- 직접 변환의 source/output/split/instruction: `scripts/convert_lerobot_to_rlds.py`의
+  `USER SETTINGS`
+- 학습 경로·dataset·horizon·모델/LoRA/optimizer/validation/W&B:
+  `scripts/train_openvla_lora.sh`의 `USER SETTINGS`
+
+실행할 때만 바꾸려면 CLI를 사용하며 우선순위는 `CLI > 상단 USER SETTINGS`다.
+
 ```bash
 cd /home/pc/openvla_piper
 scripts/openvla-pipeline install-rlds

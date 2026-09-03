@@ -15,11 +15,22 @@ from typing import Any, Iterator
 import numpy as np
 
 
-DATASET_NAME = "piper_bridge"
-DATASET_VERSION = "1.0.0"
+# ============================== USER SETTINGS ==============================
+# vla_pipeline utility scripts처럼 직접 실행할 때의 기본값은 여기서 바꾼다.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SOURCE_ROOT = Path("/home/pc/vla_pipeline/episodes/two_block_pnp")
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "artifacts" / "rlds"
+DEFAULT_RLDS_DATASET_NAME = "piper_bridge"  # changing this also needs OpenVLA registry entries
+DEFAULT_RLDS_DATASET_VERSION = "1.0.0"
 DEFAULT_REPO_ID = "romalab-cbf/two_block_pnp"
 DEFAULT_SOURCE_REVISION = "4e1a8ce8da637dca8b2f1437ec5e613186d3dd34"
 DEFAULT_SOURCE_INFO_SHA256 = "8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9"
+DEFAULT_MAX_EPISODES = None
+DEFAULT_VAL_FRACTION = 0.05
+DEFAULT_SPLIT_SEED = 7
+DEFAULT_INSTRUCTION = None  # None keeps each recorded task string
+# ===========================================================================
+
 EXPECTED_VECTOR_NAMES = [
     "joint_1.pos",
     "joint_2.pos",
@@ -39,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Convert PiPER LeRobotDataset v3 episodes to TFDS/RLDS."
     )
-    parser.add_argument("--lerobot-root", type=Path, required=True)
+    parser.add_argument("--lerobot-root", type=Path, default=DEFAULT_SOURCE_ROOT)
+    parser.add_argument("--dataset-name", default=DEFAULT_RLDS_DATASET_NAME)
+    parser.add_argument("--dataset-version", default=DEFAULT_RLDS_DATASET_VERSION)
     parser.add_argument("--repo-id", default=DEFAULT_REPO_ID)
     parser.add_argument(
         "--source-revision",
@@ -47,12 +60,13 @@ def parse_args() -> argparse.Namespace:
         help="Hugging Face dataset commit represented by the local source snapshot.",
     )
     parser.add_argument("--source-info-sha256", default=DEFAULT_SOURCE_INFO_SHA256)
-    parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--max-episodes", type=int)
-    parser.add_argument("--val-fraction", type=float, default=0.05)
-    parser.add_argument("--split-seed", type=int, default=7)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--max-episodes", type=int, default=DEFAULT_MAX_EPISODES)
+    parser.add_argument("--val-fraction", type=float, default=DEFAULT_VAL_FRACTION)
+    parser.add_argument("--split-seed", type=int, default=DEFAULT_SPLIT_SEED)
     parser.add_argument(
         "--instruction",
+        default=DEFAULT_INSTRUCTION,
         help="Override every source task string. By default each recorded task is retained.",
     )
     return parser.parse_args()
@@ -177,7 +191,11 @@ def main() -> int:
             "local source metadata does not match the pinned Hugging Face revision: "
             f"expected {args.source_info_sha256}, got {source_info_sha256}"
         )
-    final_dir = output_root / DATASET_NAME / DATASET_VERSION
+    if not args.dataset_name.replace("_", "").isalnum() or not args.dataset_name.islower():
+        raise ValueError("--dataset-name must be lowercase snake_case")
+    rlds_dataset_name = args.dataset_name
+    rlds_dataset_version = args.dataset_version
+    final_dir = output_root / rlds_dataset_name / rlds_dataset_version
     if final_dir.exists():
         raise FileExistsError(
             f"RLDS output already exists: {final_dir}; choose a new --output-root"
@@ -194,8 +212,9 @@ def main() -> int:
     )
 
     class PiperBridge(tfds.core.GeneratorBasedBuilder):
-        VERSION = tfds.core.Version(DATASET_VERSION)
-        RELEASE_NOTES = {DATASET_VERSION: "LeRobotDataset v3 PiPER conversion."}
+        name = rlds_dataset_name
+        VERSION = tfds.core.Version(rlds_dataset_version)
+        RELEASE_NOTES = {rlds_dataset_version: "LeRobotDataset v3 PiPER conversion."}
 
         def _info(self):
             return tfds.core.DatasetInfo(
@@ -282,8 +301,8 @@ def main() -> int:
 
     manifest = {
         "schema_version": 1,
-        "dataset_name": DATASET_NAME,
-        "dataset_version": DATASET_VERSION,
+        "dataset_name": rlds_dataset_name,
+        "dataset_version": rlds_dataset_version,
         "source_format": "LeRobotDataset-v3.0",
         "source_root": str(source_root),
         "source_info_sha256": source_info_sha256,
@@ -302,7 +321,7 @@ def main() -> int:
         stream.write("\n")
     os.replace(temporary, manifest_path)
 
-    loaded = tfds.builder(DATASET_NAME, data_dir=output_root)
+    loaded = tfds.builder(rlds_dataset_name, data_dir=output_root)
     print(
         "rlds_conversion=complete "
         f"path={loaded.data_dir} train_episodes={len(train_episodes)} "
