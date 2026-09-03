@@ -4,10 +4,12 @@ set -euo pipefail
 script_path="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
 runtime_root="${project_root}/.runtime"
+installer_program="${OPENVLA_INSTALL_ENTRYPOINT:-scripts/install_rtx4090.sh}"
 
 dry_run=0
 skip_ros_check=0
 disable_conda_bootstrap=0
+gpu_profile_cli=""
 prefix_cli=""
 python_cli=""
 cuda_index_cli=""
@@ -16,14 +18,15 @@ piper_repo_cli=""
 lerobot_prefix_cli=""
 
 usage() {
-  cat <<'EOF'
-usage: scripts/install_rtx4090.sh [options]
+  cat <<EOF
+usage: ${installer_program} [options]
 
 Create/update an OpenVLA model-server conda env. The existing LeRobot env is
 validated read-only and reused by the client; it is never installed or changed.
 
 options:
   --prefix PATH              OpenVLA server conda prefix
+  --gpu-profile PROFILE      auto, rtx4090, or rtx6000-ada
   --python VERSION           3.10 (default) or 3.11
   --cuda-index URL           official PyTorch cu128/cu126 wheel index
   --openvla-oft-repo PATH    already Piper-patched OFT checkout
@@ -35,7 +38,8 @@ options:
   --help
 
 environment fallbacks:
-  OPENVLA_INSTALL_PREFIX, OPENVLA_INSTALL_PYTHON, OPENVLA_TORCH_INDEX_URL,
+  OPENVLA_GPU_PROFILE, OPENVLA_INSTALL_PREFIX, OPENVLA_INSTALL_PYTHON,
+  OPENVLA_TORCH_INDEX_URL,
   OPENVLA_OFT_REPO, PIPER_REPO, LEROBOT_CONDA_PREFIX, active CONDA_PREFIX,
   CONDA_EXE,
   OPENVLA_BOOTSTRAP_CONDA=0|1
@@ -52,6 +56,8 @@ while (( $# > 0 )); do
   case "$1" in
     --prefix) need_value "$@"; prefix_cli="$2"; shift 2 ;;
     --prefix=*) prefix_cli="${1#--prefix=}"; shift ;;
+    --gpu-profile) need_value "$@"; gpu_profile_cli="$2"; shift 2 ;;
+    --gpu-profile=*) gpu_profile_cli="${1#--gpu-profile=}"; shift ;;
     --python) need_value "$@"; python_cli="$2"; shift 2 ;;
     --python=*) python_cli="${1#--python=}"; shift ;;
     --cuda-index) need_value "$@"; cuda_index_cli="$2"; shift 2 ;;
@@ -80,6 +86,7 @@ run() {
 }
 
 install_prefix="${prefix_cli:-${OPENVLA_INSTALL_PREFIX:-${runtime_root}/envs/openvla-server}}"
+gpu_profile="${gpu_profile_cli:-${OPENVLA_GPU_PROFILE:-rtx4090}}"
 python_version="${python_cli:-${OPENVLA_INSTALL_PYTHON:-3.10}}"
 cuda_index="${cuda_index_cli:-${OPENVLA_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}}"
 oft_explicit=0
@@ -110,6 +117,12 @@ lerobot_prefix="$(realpath -m "${lerobot_prefix}")"
 [[ "${python_version}" == "3.10" || "${python_version}" == "3.11" ]] || {
   printf 'error=unsupported_python value=%q allowed=3.10_or_3.11\n' "${python_version}" >&2; exit 2;
 }
+case "${gpu_profile}" in auto|rtx4090|rtx6000-ada) ;; *)
+  printf 'error=unsupported_gpu_profile value=%q allowed=auto,rtx4090,rtx6000-ada\n' \
+    "${gpu_profile}" >&2
+  exit 2
+  ;;
+esac
 case "${cuda_index}" in
   https://download.pytorch.org/whl/cu128) expected_torch_cuda="12.8" ;;
   https://download.pytorch.org/whl/cu126) expected_torch_cuda="12.6" ;;
@@ -118,7 +131,20 @@ esac
 
 preflight_args=()
 if (( skip_ros_check == 1 )); then preflight_args+=(--skip-ros-check); fi
-"${project_root}/scripts/preflight_rtx4090.sh" "${preflight_args[@]}"
+preflight_output="$(
+  "${project_root}/scripts/preflight_openvla_gpu.sh" \
+    --gpu-profile "${gpu_profile}" "${preflight_args[@]}"
+)"
+printf '%s\n' "${preflight_output}"
+case "${preflight_output}" in
+  *"gpu_profile=rtx6000-ada "*) detected_gpu_profile=rtx6000-ada ;;
+  *"gpu_profile=rtx4090 "*) detected_gpu_profile=rtx4090 ;;
+  *) printf '%s\n' 'error=preflight_profile_missing' >&2; exit 1 ;;
+esac
+case "${detected_gpu_profile}" in
+  rtx4090) server_requirements="${project_root}/requirements-rtx4090.txt" ;;
+  rtx6000-ada) server_requirements="${project_root}/requirements-rtx6000-ada.txt" ;;
+esac
 
 patch_file="${project_root}/vendor/openvla-oft-piper.patch"
 patch_sha="b4008312226af0f1509bd81ccacd13b0306dc845ba767f5a666d8cb170f43e76"
@@ -242,6 +268,7 @@ export PIP_CACHE_DIR="${runtime_root}/pip-cache"
 # contaminating dependency resolution and pip check.
 export PYTHONNOUSERSITE=1
 printf 'install_prefix=%s\npython_version=%s\n' "${install_prefix}" "${python_version}"
+printf 'gpu_profile=%s requirements=%s\n' "${detected_gpu_profile}" "${server_requirements}"
 printf 'torch_versions=2.7.1,0.22.1,2.7.1 expected_cuda=%s index=%s\n' "${expected_torch_cuda}" "${cuda_index}"
 printf 'openvla_oft_repo=%s\npiper_repo=%s\nlerobot_prefix=%s\n' "${oft_repo}" "${piper_repo}" "${lerobot_prefix}"
 printf 'mode=%s\n' "$([[ ${dry_run} -eq 1 ]] && printf dry-run || printf install)"
@@ -260,25 +287,32 @@ fi
 python_bin="${install_prefix}/bin/python"
 run "${python_bin}" -m pip install --upgrade pip==25.1.1 setuptools==75.8.0 wheel==0.45.1
 run "${python_bin}" -m pip install --index-url "${cuda_index}" torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
-run "${python_bin}" -m pip install --constraint "${project_root}/constraints-rtx4090.txt" --requirement "${project_root}/requirements-rtx4090.txt"
+run "${python_bin}" -m pip install --constraint "${project_root}/constraints-openvla-ada.txt" --requirement "${server_requirements}"
 run "${python_bin}" -m pip install --no-deps --editable "${oft_repo}"
 run "${python_bin}" -m pip install --no-deps --editable "${project_root}"
 run "${python_bin}" -m pip check
 
 gpu_probe='import sys, torch, torchvision, torchaudio
 expected=sys.argv[1]
+profile=sys.argv[2]
 assert torch.__version__.split("+")[0]=="2.7.1"
 assert torchvision.__version__.split("+")[0]=="0.22.1"
 assert torchaudio.__version__.split("+")[0]=="2.7.1"
 assert torch.version.cuda==expected and torch.cuda.is_available()
 name=torch.cuda.get_device_name(0); cap=torch.cuda.get_device_capability(0)
 total=torch.cuda.get_device_properties(0).total_memory//(1024*1024)
-assert "RTX 4090" in name and cap==(8,9) and 23000<=total<=26000
+contracts={
+    "rtx4090": ("RTX 4090", (8,9), 23000, 26000),
+    "rtx6000-ada": ("RTX 6000 Ada", (8,9), 45000, 51000),
+}
+name_token, expected_cap, minimum_mib, maximum_mib=contracts[profile]
+assert name_token in name and cap==expected_cap and minimum_mib<=total<=maximum_mib
 probe=torch.arange(16, device="cuda:0", dtype=torch.float32).sum()
 torch.cuda.synchronize(0)
 assert probe.item()==120.0
-print(f"torch_cuda_verified=True name={name} capability={cap} total_vram_mib={total} cuda={torch.version.cuda} arch_list={torch.cuda.get_arch_list()} kernel=True")'
-run env PYTHONDONTWRITEBYTECODE=1 "${python_bin}" -c "${gpu_probe}" "${expected_torch_cuda}"
+print(f"torch_cuda_verified=True profile={profile} name={name} capability={cap} total_vram_mib={total} cuda={torch.version.cuda} arch_list={torch.cuda.get_arch_list()} kernel=True")'
+run env PYTHONDONTWRITEBYTECODE=1 "${python_bin}" -c "${gpu_probe}" \
+  "${expected_torch_cuda}" "${detected_gpu_profile}"
 run env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
   OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4 \
   TF_NUM_INTRAOP_THREADS=1 TF_NUM_INTEROP_THREADS=1 \

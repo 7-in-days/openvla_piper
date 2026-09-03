@@ -12,23 +12,40 @@ PiPER 로봇에서 OpenVLA-OFT 체크포인트를 추론하기 위한 독립 워
 
 ## 1. 설치
 
-RTX 4090용 OpenVLA 서버 환경은 `.runtime/envs/openvla-server`에 만들고, 기존 LeRobot
-환경은 클라이언트용으로 읽기만 한다. 사용자 전역 `~/.local` 패키지는 설치·실행 모두에서
-차단된다.
+OpenVLA 서버 환경은 GPU와 무관하게 `.runtime/envs/openvla-server` Conda prefix에 만들고,
+기존 LeRobot 환경은 클라이언트용으로 읽기만 한다. 사용자 전역 `~/.local` 패키지는
+설치·실행 모두에서 차단된다. 기본 설치기는 `nvidia-smi`에서 RTX 4090 또는 RTX 6000 Ada를
+자동 판별한다.
 
 ```bash
 cd /home/pc/openvla_piper
-scripts/install_rtx4090.sh \
+scripts/install_openvla.sh \
   --lerobot-prefix /home/pc/miniconda3/envs/lerobot-060 \
   --piper-repo /home/pc/vla_pipeline
 ```
 
-설치기는 Ubuntu, RTX 4090, NVIDIA driver, ROS 2 Humble을 검사하고 다음 버전을 고정한다.
+RTX 6000 Ada만 명시적으로 허용하는 새 PC 설치는 다음 진입점을 사용한다.
+
+```bash
+scripts/install_rtx6000_ada.sh \
+  --lerobot-prefix /PATH/TO/lerobot-060 \
+  --piper-repo /PATH/TO/vla_pipeline
+```
+
+설치기는 Ubuntu, NVIDIA driver, GPU 이름/compute capability/VRAM, ROS 2 Humble을 검사하고
+다음 버전을 고정한다.
 
 - Python 3.10
 - PyTorch 2.7.1 / torchvision 0.22.1 / torchaudio 2.7.1, CUDA 12.8 wheel
 - OpenVLA-OFT 및 Piper 패치 고정 revision
-- `requirements-rtx4090.txt`의 모델 서버 의존성
+- `requirements-openvla-ada.txt`의 공통 모델 서버 의존성
+
+`requirements-rtx4090.txt`와 `requirements-rtx6000-ada.txt`는 하드웨어별 진입점이고 공통
+버전 pin을 재사용한다. 두 GPU 모두 Ada SM 8.9용 동일 PyTorch wheel을 사용하며, 4090은 약
+24 GiB, RTX 6000 Ada는 약 48 GiB 범위를 별도로 검증한다. RTX 6000 Ada의 공식 사양은
+[48GB GDDR6 ECC](https://www.nvidia.com/en-us/products/workstations/rtx-6000/)이고 PyTorch
+2.7.1은 공식적으로 [CUDA 12.6/12.8 wheel](https://pytorch.org/get-started/previous-versions/)을
+제공한다.
 
 설치 계획만 확인하려면 `--dry-run`을 추가한다. 정상 설치 후 선택한 경로는
 `.install-prefix`, `.lerobot-prefix`, `.openvla-oft-repo`, `.piper-repo`에 기록되며 런처가
@@ -124,7 +141,7 @@ instruction이며 FiLM은 단일 instruction 작업이므로 끈다. 기본 acti
 scripts/openvla-pipeline train-lora --dry-run
 ```
 
-RTX 4090에서 실제 학습:
+지원되는 Ada GPU에서 실제 학습:
 
 ```bash
 cd /home/pc/openvla_piper
@@ -211,7 +228,7 @@ scripts/openvla-pipeline model-server \
 ```
 
 모델 로드와 LoRA 병합이 끝난 뒤 확인한다.
-RTX 4090에서 7B load와 safe merge가 끝날 때까지 수 분 걸릴 수 있으며 자동 실행의 기본
+7B load와 safe merge가 끝날 때까지 수 분 걸릴 수 있으며 자동 실행의 기본
 health 대기 한도는 300초다.
 
 ```bash
@@ -304,6 +321,6 @@ tail -n 20 "$latest/inference_observability.jsonl"
 
 CPU smoke와 contract verifier는 FastAPI `/health`·`/act`·OpenAPI schema, 인증/크기 제한,
 설정 우선순위, 안전 gate, action shape/단위, 토픽 이름, chunk 직렬화, JSONL atomic flush를
-검증한다. GPU preflight와 설치기는 실제 RTX 4090 CUDA kernel도 실행한다. 실제 checkpoint
+검증한다. GPU preflight와 설치기는 선택된 4090/RTX 6000 Ada에서 실제 CUDA kernel도 실행한다. 실제 checkpoint
 load·LoRA 병합·단일 이미지쌍 추론은 모델 서버 검증에 포함하며, `SyncedFrame → OpenVLA → ROS`
 dry-run은 camera/data hub와 rosbridge가 실행 중일 때 수행한다.

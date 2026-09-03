@@ -18,7 +18,7 @@ if [[ -z "${runtime_prefix}" && -r "${project_root}/.install-prefix" ]]; then
 fi
 hub_cli="${runtime_prefix}/bin/huggingface-cli"
 [[ -x "${hub_cli}" ]] || {
-  printf '%s\n' 'error=runtime_environment_missing hint=run_scripts/install_rtx4090.sh' >&2
+  printf '%s\n' 'error=runtime_environment_missing hint=run_scripts/install_openvla.sh' >&2
   exit 1
 }
 

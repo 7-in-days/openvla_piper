@@ -1,0 +1,15 @@
+# Training-compatible runtime constraints for Python 3.10/3.11 on supported Ada GPUs.
+numpy==1.26.4
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1
+transformers==4.40.1
+peft==0.11.1
+tensorflow==2.15.0
+tensorflow-datasets==4.9.3
+tokenizers==0.19.1
+timm==0.9.10
+sentencepiece==0.1.99
+draccus==0.8.0
+protobuf==4.25.9
+json-numpy==2.1.1

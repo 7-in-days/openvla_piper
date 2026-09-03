@@ -1,5 +1,5 @@
-# Compatibility pointer. The supported RTX 4090 installation is pinned in:
-#   requirements-rtx4090.txt
-#   constraints-rtx4090.txt
-# Run scripts/install_rtx4090.sh instead of installing this file directly.
--r requirements-rtx4090.txt
+# Compatibility pointer. Supported Ada GPU dependencies are pinned in:
+#   requirements-openvla-ada.txt
+#   constraints-openvla-ada.txt
+# Run scripts/install_openvla.sh instead of installing this file directly.
+-r requirements-openvla-ada.txt

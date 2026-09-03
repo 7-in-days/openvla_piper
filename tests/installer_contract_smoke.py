@@ -1,4 +1,4 @@
-"""Network/GPU-free contract test for install_rtx4090.sh."""
+"""Network/GPU-free contract test for supported Ada GPU installers."""
 
 from __future__ import annotations
 
@@ -10,7 +10,11 @@ import tempfile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = PROJECT_ROOT / "scripts/install_rtx4090.sh"
+AUTO_INSTALLER = PROJECT_ROOT / "scripts/install_openvla.sh"
+RTX6000_ADA_INSTALLER = PROJECT_ROOT / "scripts/install_rtx6000_ada.sh"
 SERVER_REQUIREMENTS = PROJECT_ROOT / "requirements-rtx4090.txt"
+RTX6000_ADA_REQUIREMENTS = PROJECT_ROOT / "requirements-rtx6000-ada.txt"
+COMMON_REQUIREMENTS = PROJECT_ROOT / "requirements-openvla-ada.txt"
 
 
 def write_executable(path: Path, body: str) -> None:
@@ -80,6 +84,7 @@ def run_installer(
     os_version: str = "24.04",
     gpu_row: str | None = None,
     conda_missing: bool = False,
+    installer: Path = INSTALLER,
 ) -> subprocess.CompletedProcess[str]:
     os_release, nvidia_smi, conda, git, oft, piper, lerobot = fixture(
         root, os_version=os_version, gpu_row=gpu_row
@@ -108,7 +113,7 @@ def run_installer(
     return subprocess.run(
         [
             "bash",
-            str(INSTALLER),
+            str(installer),
             "--dry-run",
             "--skip-ros-check",
             "--prefix",
@@ -137,7 +142,9 @@ def main() -> None:
         raise RuntimeError("installer smoke requires CUDA_VISIBLE_DEVICES='' exactly")
     assert "torch" not in __import__("sys").modules
 
-    requirement_text = SERVER_REQUIREMENTS.read_text(encoding="utf-8")
+    requirement_text = COMMON_REQUIREMENTS.read_text(encoding="utf-8")
+    rtx4090_requirement_text = SERVER_REQUIREMENTS.read_text(encoding="utf-8")
+    rtx6000_requirement_text = RTX6000_ADA_REQUIREMENTS.read_text(encoding="utf-8")
     installer_text = INSTALLER.read_text(encoding="utf-8")
     install_pointer = PROJECT_ROOT / ".install-prefix"
     install_pointer_before = (
@@ -155,6 +162,8 @@ def main() -> None:
     ):
         assert required_distribution in requirement_text, required_distribution
     assert "lerobot==" not in requirement_text.lower()
+    assert "-r requirements-openvla-ada.txt" in rtx4090_requirement_text
+    assert "-r requirements-openvla-ada.txt" in rtx6000_requirement_text
     assert "export PYTHONNOUSERSITE=1" in installer_text
     assert "torch.cuda.synchronize" in installer_text
 
@@ -202,6 +211,30 @@ def main() -> None:
         assert wrong_capability.returncode != 0
         assert "error=compute_capability_mismatch" in wrong_capability.stderr
 
+    rtx6000_row = (
+        "NVIDIA RTX 6000 Ada Generation, 575.64.03, 8.9, 49140, 47000"
+    )
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        rtx6000 = run_installer(
+            Path(temporary_directory),
+            gpu_row=rtx6000_row,
+            installer=RTX6000_ADA_INSTALLER,
+        )
+        assert rtx6000.returncode == 0, rtx6000.stderr
+        assert "rtx6000_ada_preflight=True" in rtx6000.stdout
+        assert "gpu_profile=rtx6000-ada" in rtx6000.stdout
+        assert "requirements-rtx6000-ada.txt" in rtx6000.stdout
+        assert "installer_complete=planned" in rtx6000.stdout
+
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        automatic = run_installer(
+            Path(temporary_directory),
+            gpu_row=rtx6000_row,
+            installer=AUTO_INSTALLER,
+        )
+        assert automatic.returncode == 0, automatic.stderr
+        assert "gpu_profile=rtx6000-ada" in automatic.stdout
+
     print("installer_cli_over_env=True")
     print("installer_dry_run_no_conda_execution=True")
     print("project_local_miniforge_fallback=True")
@@ -210,6 +243,8 @@ def main() -> None:
     print("installer_network_accessed=False")
     print("installer_gpu_accessed=False")
     print("rtx4090_contract=name,capability_8.9,approx_24GiB,kernel")
+    print("rtx6000_ada_contract=name,capability_8.9,approx_48GiB,kernel")
+    print("gpu_profile_auto_detection=True")
     print("free_vram_install_gate=False")
     print("unsupported_os_capability_vram_fail_closed=True")
     print("installer_contract_smoke=True")

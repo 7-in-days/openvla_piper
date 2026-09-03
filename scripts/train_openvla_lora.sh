@@ -8,7 +8,7 @@ if [[ -z "${runtime_prefix}" && -r "${project_root}/.install-prefix" ]]; then
   IFS= read -r runtime_prefix <"${project_root}/.install-prefix"
 fi
 [[ -n "${runtime_prefix}" && -x "${runtime_prefix}/bin/python" ]] || {
-  printf '%s\n' 'error=openvla_runtime_missing hint=run_scripts/install_rtx4090.sh' >&2
+  printf '%s\n' 'error=openvla_runtime_missing hint=run_scripts/install_openvla.sh' >&2
   exit 1
 }
 cd "${project_root}"

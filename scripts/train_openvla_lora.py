@@ -98,9 +98,9 @@ def build_command(config: TrainingConfig) -> tuple[list[str], dict[str, str]]:
     runtime_prefix = os.environ.get("OPENVLA_CONDA_PREFIX") or _pointer(".install-prefix")
     oft_text = os.environ.get("OPENVLA_OFT_REPO") or _pointer(".openvla-oft-repo")
     if not runtime_prefix:
-        raise RuntimeError("openvla_runtime_missing hint=run_scripts/install_rtx4090.sh")
+        raise RuntimeError("openvla_runtime_missing hint=run_scripts/install_openvla.sh")
     if not oft_text:
-        raise RuntimeError("openvla_oft_source_missing hint=run_scripts/install_rtx4090.sh")
+        raise RuntimeError("openvla_oft_source_missing hint=run_scripts/install_openvla.sh")
     torchrun = Path(runtime_prefix).expanduser().resolve() / "bin/torchrun"
     oft_repo = Path(oft_text).expanduser().resolve()
     finetune = oft_repo / "vla-scripts/finetune.py"

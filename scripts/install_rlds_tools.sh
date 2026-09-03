@@ -10,7 +10,7 @@ if [[ -z "${lerobot_prefix}" && -r "${project_root}/.lerobot-prefix" ]]; then
   IFS= read -r lerobot_prefix <"${project_root}/.lerobot-prefix"
 fi
 if [[ -z "${lerobot_prefix}" || ! -x "${lerobot_prefix}/bin/python" ]]; then
-  printf '%s\n' 'error=lerobot_environment_missing hint=run_scripts/install_rtx4090.sh_first' >&2
+  printf '%s\n' 'error=lerobot_environment_missing hint=run_scripts/install_openvla.sh_first' >&2
   exit 1
 fi
 

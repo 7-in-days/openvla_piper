@@ -15,7 +15,7 @@ runtime_python() {
     IFS= read -r runtime_prefix <"${project_root}/.install-prefix"
   fi
   [[ -n "${runtime_prefix}" && -x "${runtime_prefix}/bin/python" ]] || {
-    printf '%s\n' 'error=runtime_environment_missing hint=run_scripts/install_rtx4090.sh' >&2
+    printf '%s\n' 'error=runtime_environment_missing hint=run_scripts/install_openvla.sh' >&2
     exit 1
   }
   printf '%s' "${runtime_prefix}/bin/python"

@@ -1,0 +1,2 @@
+# RTX 6000 Ada hardware entry point; dependency pins are shared across Ada GPUs.
+-r requirements-openvla-ada.txt
