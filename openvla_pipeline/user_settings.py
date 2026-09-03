@@ -12,11 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ── 1. 모델 서버 ──────────────────────────────────────────────────────────────
-# Dataset/run이 바뀌어도 이 파일이 과거 checkpoint를 조용히 선택하지 않게 한다.
-# 실행 시 wrapper의 --checkpoint SOURCE나 PIPER_OPENVLA_CHECKPOINT로 직접 지정한다.
-# SOURCE는 로컬 디렉터리 또는 hf://OWNER/REPO@REVISION 형식이다.
-CHECKPOINT: str | None = None
-BASE_MODEL: str | None = None           # None이면 checkpoint metadata의 base_vla_path 사용
+# 게시된 100K checkpoint와 metadata가 지정한 base revision의 로컬 다운로드 경로.
+# scripts/download_openvla_models.sh로 두 저장소 전체를 다운로드한다.
+CHECKPOINT: Path | str | None = (
+    PROJECT_ROOT / "artifacts/checkpoints/romalab-cbf/openvla_two_block_pnp"
+)
+BASE_MODEL: Path | str | None = PROJECT_ROOT / "artifacts/models/openvla/openvla-7b"
 OPENVLA_OFT_REPO: Path | None = None    # None이면 설치된 openvla-oft package/repository 자동 탐색
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8777
@@ -27,10 +28,10 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 # ── 2. 로봇·태스크 ────────────────────────────────────────────────────────────
 MODEL_SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 ROSBRIDGE_URL = "ws://localhost:9090"
-PIPER_REPO = Path.home() / "vla-piper"
+PIPER_REPO = Path.home() / "vla_pipeline"
 TASK = "pick up the green blocks one at a time and place them in the white box"
 MAX_ACTIONS = 500                       # 최대 실행 tick 수. 20 Hz 기준 500 tick = 25초
-HEALTH_TIMEOUT_S = 30.0
+HEALTH_TIMEOUT_S = 300.0                   # 7B load + LoRA safe merge startup budget
 REQUEST_TIMEOUT_S = 30.0
 
 

@@ -1,11 +1,14 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
 .cache/
 .install-prefix
 .install-prefix.*
 .lerobot-prefix
 .lerobot-prefix.*
+.rlds-tools-prefix
+.rlds-tools-prefix.*
 .openvla-oft-repo
 .openvla-oft-repo.*
 .piper-repo

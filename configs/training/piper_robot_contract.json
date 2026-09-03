@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "robot": "piper",
+  "control_hz": 20.0,
+  "action_encoding": "absolute_joint_position",
+  "action_names": [
+    "joint_1.pos",
+    "joint_2.pos",
+    "joint_3.pos",
+    "joint_4.pos",
+    "joint_5.pos",
+    "joint_6.pos",
+    "gripper.pos"
+  ],
+  "action_units": ["rad", "rad", "rad", "rad", "rad", "rad", "m"],
+  "state_names": [
+    "joint_1.pos",
+    "joint_2.pos",
+    "joint_3.pos",
+    "joint_4.pos",
+    "joint_5.pos",
+    "joint_6.pos",
+    "gripper.pos"
+  ],
+  "state_units": ["rad", "rad", "rad", "rad", "rad", "rad", "m"],
+  "camera_names": ["third_person", "wrist"]
+}

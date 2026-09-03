@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_path="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
+export PYTHONNOUSERSITE=1
 
 runtime_python() {
   local runtime_prefix="${OPENVLA_CONDA_PREFIX:-}"
@@ -14,6 +15,18 @@ runtime_python() {
     exit 1
   }
   printf '%s' "${runtime_prefix}/bin/python"
+}
+
+rlds_python() {
+  local rlds_prefix="${RLDS_TOOLS_PREFIX:-}"
+  if [[ -z "${rlds_prefix}" && -r "${project_root}/.rlds-tools-prefix" ]]; then
+    IFS= read -r rlds_prefix <"${project_root}/.rlds-tools-prefix"
+  fi
+  [[ -n "${rlds_prefix}" && -x "${rlds_prefix}/bin/python" ]] || {
+    printf '%s\n' 'error=rlds_environment_missing hint=run_scripts/openvla-pipeline_install-rlds' >&2
+    exit 1
+  }
+  printf '%s' "${rlds_prefix}/bin/python"
 }
 
 # The Python logger uses one bounded worker. Cap native pools before Python
@@ -44,9 +57,15 @@ usage() {
 usage: scripts/openvla-pipeline COMMAND [options]
 
 commands:
+  download-models download the pinned checkpoint and base model snapshots
+  install-rlds   install isolated LeRobot-to-RLDS conversion dependencies
+  convert-rlds   convert PiPER LeRobotDataset v3 episodes into TFDS/RLDS
+  verify-rlds    verify raw RLDS and OpenVLA-OFT piper_bridge registration
+  train-lora     run official OpenVLA-OFT synchronous LoRA fine-tuning
   show-config   print resolved user/config settings
   plan          resolve launch settings without server, ROS, or GPU access
-  model-server  start only the OpenVLA HTTP model server
+  model-server  merge LoRA and start the synchronous FastAPI model server
+  probe          run one ROS-free image-pair request against FastAPI
   dry-run       sync inference; read observations, never publish robot actions
   run-robot     sync inference with the three-part physical safety gate
   smoke         run CPU-only synthetic contract tests
@@ -59,6 +78,38 @@ EOF
 command="${1:-help}"
 if (( $# > 0 )); then shift; fi
 case "${command}" in
+  download-models)
+    exec "${project_root}/scripts/download_openvla_models.sh" "$@"
+    ;;
+  install-rlds)
+    exec "${project_root}/scripts/install_rlds_tools.sh" "$@"
+    ;;
+  convert-rlds)
+    cd "${project_root}"
+    exec env \
+      PYTHONNOUSERSITE=1 \
+      HF_HOME="${project_root}/.runtime/huggingface-rlds" \
+      HF_DATASETS_CACHE="${project_root}/.runtime/huggingface-rlds/datasets" \
+      "$(rlds_python)" scripts/convert_lerobot_to_rlds.py \
+      --lerobot-root /home/pc/vla_pipeline/episodes/two_block_pnp \
+      --repo-id romalab-cbf/two_block_pnp \
+      --source-revision 4e1a8ce8da637dca8b2f1437ec5e613186d3dd34 \
+      --source-info-sha256 8249a34b7c4614cec026cb4e520dad79f55f759e779b5192207a9b109053afd9 \
+      --output-root "${project_root}/artifacts/rlds" \
+      "$@"
+    ;;
+  verify-rlds)
+    cd "${project_root}"
+    exec env CUDA_VISIBLE_DEVICES='' TF_CPP_MIN_LOG_LEVEL=3 MPLCONFIGDIR="${project_root}/.runtime/matplotlib" \
+      HF_HOME="${project_root}/.runtime/huggingface-rlds" \
+      TRANSFORMERS_CACHE="${project_root}/.runtime/huggingface-rlds/transformers" \
+      ROBOT_PLATFORM=PIPER PIPER_ACTION_CHUNK="${PIPER_ACTION_CHUNK:-50}" \
+      "$(runtime_python)" scripts/verify_rlds_dataset.py \
+      --data-root "${project_root}/artifacts/rlds" "$@"
+    ;;
+  train-lora)
+    exec "${project_root}/scripts/train_openvla_lora.sh" "$@"
+    ;;
   show-config)
     cd "${project_root}"
     exec "$(runtime_python)" \
@@ -71,6 +122,10 @@ case "${command}" in
   model-server)
     exec "${project_root}/tools/run_piper_openvla_server.sh" "$@"
     ;;
+  probe)
+    cd "${project_root}"
+    exec "$(runtime_python)" scripts/probe_fastapi_inference.py "$@"
+    ;;
   dry-run)
     exec "${project_root}/tools/run_piper_openvla_runtime.sh" sync "$@" --mode dry-run
     ;;
@@ -79,8 +134,13 @@ case "${command}" in
     ;;
   smoke)
     cd "${project_root}"
+    test_python="$(runtime_python)"
+    env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
+      "${test_python}" tests/cpu_only_smoke.py
+    env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
+      "${test_python}" tests/rlds_converter_smoke.py
     exec env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
-      "${OPENVLA_TEST_PYTHON:-python3}" tests/cpu_only_smoke.py
+      "${test_python}" tests/fastapi_server_smoke.py
     ;;
   help|-h|--help)
     usage

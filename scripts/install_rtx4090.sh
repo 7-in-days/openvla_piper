@@ -27,7 +27,7 @@ options:
   --python VERSION           3.10 (default) or 3.11
   --cuda-index URL           official PyTorch cu128/cu126 wheel index
   --openvla-oft-repo PATH    already Piper-patched OFT checkout
-  --piper-repo PATH          exact vla-piper checkout
+  --piper-repo PATH          exact PiPER rosbridge adapter checkout
   --lerobot-prefix PATH      existing LeRobot client conda prefix
   --no-conda-bootstrap       fail instead of project-local Miniforge fallback
   --skip-ros-check           skip ROS2 Humble system preflight only
@@ -237,6 +237,10 @@ fi
 export CONDARC="${runtime_root}/condarc"
 export CONDA_PKGS_DIRS="${runtime_root}/conda-pkgs"
 export PIP_CACHE_DIR="${runtime_root}/pip-cache"
+# A prefix Python otherwise still sees ~/.local packages.  Keep the model
+# server reproducible and prevent unrelated packages (for example pyzed) from
+# contaminating dependency resolution and pip check.
+export PYTHONNOUSERSITE=1
 printf 'install_prefix=%s\npython_version=%s\n' "${install_prefix}" "${python_version}"
 printf 'torch_versions=2.7.1,0.22.1,2.7.1 expected_cuda=%s index=%s\n' "${expected_torch_cuda}" "${cuda_index}"
 printf 'openvla_oft_repo=%s\npiper_repo=%s\nlerobot_prefix=%s\n' "${oft_repo}" "${piper_repo}" "${lerobot_prefix}"
@@ -270,10 +274,15 @@ assert torch.version.cuda==expected and torch.cuda.is_available()
 name=torch.cuda.get_device_name(0); cap=torch.cuda.get_device_capability(0)
 total=torch.cuda.get_device_properties(0).total_memory//(1024*1024)
 assert "RTX 4090" in name and cap==(8,9) and 23000<=total<=26000
-assert "sm_89" in torch.cuda.get_arch_list()
-print(f"torch_cuda_verified=True name={name} capability={cap} total_vram_mib={total} cuda={torch.version.cuda}")'
+probe=torch.arange(16, device="cuda:0", dtype=torch.float32).sum()
+torch.cuda.synchronize(0)
+assert probe.item()==120.0
+print(f"torch_cuda_verified=True name={name} capability={cap} total_vram_mib={total} cuda={torch.version.cuda} arch_list={torch.cuda.get_arch_list()} kernel=True")'
 run env PYTHONDONTWRITEBYTECODE=1 "${python_bin}" -c "${gpu_probe}" "${expected_torch_cuda}"
-run env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 "${python_bin}" "${project_root}/tests/cpu_only_smoke.py"
+run env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
+  OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 NUMEXPR_NUM_THREADS=4 \
+  TF_NUM_INTRAOP_THREADS=1 TF_NUM_INTEROP_THREADS=1 \
+  "${python_bin}" "${project_root}/tests/cpu_only_smoke.py"
 
 if (( dry_run == 0 )); then
   for record in ".install-prefix:${install_prefix}" ".lerobot-prefix:${lerobot_prefix}" ".openvla-oft-repo:${oft_repo}" ".piper-repo:${piper_repo}"; do

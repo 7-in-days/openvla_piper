@@ -138,6 +138,11 @@ def main() -> None:
     assert "torch" not in __import__("sys").modules
 
     requirement_text = SERVER_REQUIREMENTS.read_text(encoding="utf-8")
+    installer_text = INSTALLER.read_text(encoding="utf-8")
+    install_pointer = PROJECT_ROOT / ".install-prefix"
+    install_pointer_before = (
+        install_pointer.read_bytes() if install_pointer.exists() else None
+    )
     for required_distribution in (
         "draccus==0.8.0",
         "matplotlib==3.10.9",
@@ -150,6 +155,8 @@ def main() -> None:
     ):
         assert required_distribution in requirement_text, required_distribution
     assert "lerobot==" not in requirement_text.lower()
+    assert "export PYTHONNOUSERSITE=1" in installer_text
+    assert "torch.cuda.synchronize" in installer_text
 
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
@@ -161,7 +168,10 @@ def main() -> None:
         assert "installer_complete=planned" in success.stdout
         assert "warning=low_free_vram" in success.stderr
         assert not (root / "target prefix").exists()
-        assert not (PROJECT_ROOT / ".install-prefix").exists()
+        install_pointer_after = (
+            install_pointer.read_bytes() if install_pointer.exists() else None
+        )
+        assert install_pointer_after == install_pointer_before
 
     with tempfile.TemporaryDirectory() as temporary_directory:
         local_miniforge = run_installer(
@@ -199,7 +209,7 @@ def main() -> None:
     print("openvla_metadata_dependencies_complete=True")
     print("installer_network_accessed=False")
     print("installer_gpu_accessed=False")
-    print("rtx4090_contract=name,sm_89,approx_24GiB")
+    print("rtx4090_contract=name,capability_8.9,approx_24GiB,kernel")
     print("free_vram_install_gate=False")
     print("unsupported_os_capability_vram_fail_closed=True")
     print("installer_contract_smoke=True")

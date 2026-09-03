@@ -64,7 +64,16 @@ class PiperOpenVLAPolicy:
             max_arm_step_delta_rad,
         )
         self._lock = threading.Lock()
+        self._log_load_event(
+            "model_load_start",
+            checkpoint=str(self.checkpoint),
+            base_model=str(self.base_model),
+        )
         self._load_model()
+
+    @staticmethod
+    def _log_load_event(event: str, **fields: Any) -> None:
+        print(json.dumps({"event": event, **fields}, separators=(",", ":")), flush=True)
 
     def _load_and_validate_metadata(self) -> dict[str, Any]:
         metadata_path = self.checkpoint / "checkpoint_metadata.json"
@@ -254,6 +263,7 @@ class PiperOpenVLAPolicy:
         required = (
             self.base_model / "config.json",
             self.checkpoint / "lora_adapter" / "adapter_config.json",
+            self.checkpoint / "lora_adapter" / "adapter_model.safetensors",
             self.checkpoint / "action_head.pt",
             self.checkpoint / "proprio_projector.pt",
             self.checkpoint / "dataset_statistics.json",
@@ -310,12 +320,22 @@ class PiperOpenVLAPolicy:
             trust_remote_code=False,
             local_files_only=True,
         )
-        vla = PeftModel.from_pretrained(
+        self._log_load_event("base_model_loaded", base_model=str(self.base_model))
+        lora_adapter = self.checkpoint / "lora_adapter"
+        peft_vla = PeftModel.from_pretrained(
             base_vla,
-            self.checkpoint / "lora_adapter",
+            lora_adapter,
             is_trainable=False,
             local_files_only=True,
-        ).merge_and_unload()
+        )
+        self._log_load_event("lora_adapter_attached", lora_adapter=str(lora_adapter))
+        # Deployment uses one immutable synchronous policy. Merge the trained
+        # LoRA delta into the base weights once, before loading the auxiliary
+        # action/proprio heads or accepting any FastAPI request.
+        vla = peft_vla.merge_and_unload(safe_merge=True)
+        self._lora_adapter = lora_adapter
+        self._lora_merged = True
+        self._log_load_event("lora_adapter_merged", safe_merge=True)
         vla.vision_backbone.set_num_images_in_input(self.num_images_in_input)
         with (self.checkpoint / "dataset_statistics.json").open("r", encoding="utf-8") as file:
             vla.norm_stats = json.load(file)
@@ -337,6 +357,11 @@ class PiperOpenVLAPolicy:
             self._load_component(torch, self.checkpoint / "proprio_projector.pt")
         )
         proprio_projector.eval()
+        self._log_load_event(
+            "policy_components_loaded",
+            action_head=str(self.checkpoint / "action_head.pt"),
+            proprio_projector=str(self.checkpoint / "proprio_projector.pt"),
+        )
 
         self._torch = torch
         self._device = device
@@ -402,6 +427,8 @@ class PiperOpenVLAPolicy:
             "base_model": str(self.base_model),
             "base_model_source": self.base_model_source,
             "base_model_source_kind": self.base_model_source_kind,
+            "lora_adapter": str(self._lora_adapter),
+            "lora_merged": self._lora_merged,
             "gpu": self._torch.cuda.get_device_name(self._device),
             "compute_capability": list(self._torch.cuda.get_device_capability(self._device)),
             "action_shape": list(self.action_shape),
