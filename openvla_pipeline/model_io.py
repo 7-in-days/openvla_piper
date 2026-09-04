@@ -6,7 +6,9 @@ import base64
 import io
 import json
 import os
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +47,8 @@ def _action_chunk_from_environment() -> int | None:
 
 ACTION_CHUNK = _action_chunk_from_environment()
 IMAGE_KEYS = ("third_person", "wrist")
+MODEL_IMAGE_SIZE = 224
+CLIENT_RESIZE_ALGORITHM = "openvla_oft_rlds_lanczos3_224"
 UNNORM_KEY = "piper_bridge"
 LIVE_CONFIRMATION = "PIPER_OPENVLA_LIVE_CONFIRMED"
 
@@ -53,13 +57,68 @@ class ContractError(ValueError):
     """Raised when a deployment request violates the trained Piper contract."""
 
 
-def encode_png(image: np.ndarray) -> str:
+def _validate_rgb_image(image: np.ndarray) -> np.ndarray:
     array = np.asarray(image)
     if array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 3:
         raise ContractError(f"image must be uint8 HxWx3 RGB, got shape={array.shape} dtype={array.dtype}")
+    return array
+
+
+@lru_cache(maxsize=1)
+def _client_tensorflow() -> Any:
+    """Initialize TensorFlow once without exposing the robot process to CUDA."""
+
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    import tensorflow as tf
+
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except RuntimeError as exc:
+        if tf.config.get_visible_devices("GPU"):
+            raise RuntimeError(
+                "TensorFlow initialized CUDA before client image resize setup"
+            ) from exc
+    return tf
+
+
+def resize_image_for_policy(image: np.ndarray, resize_size: int = MODEL_IMAGE_SIZE) -> np.ndarray:
+    """Apply the exact OpenVLA-OFT/RLDS inference resize on the client CPU."""
+
+    array = _validate_rgb_image(image)
+    if resize_size <= 0:
+        raise ContractError(f"resize_size must be positive, got {resize_size}")
+
+    # Kept byte-for-byte equivalent to the pinned OpenVLA-OFT helper at
+    # experiments/robot/openvla_utils.py::resize_image_for_policy.
+    tf = _client_tensorflow()
+
+    resized = tf.image.encode_jpeg(array)
+    resized = tf.io.decode_image(resized, expand_animations=False, dtype=tf.uint8)
+    resized = tf.image.resize(
+        resized,
+        (resize_size, resize_size),
+        method="lanczos3",
+        antialias=True,
+    )
+    resized = tf.cast(tf.clip_by_value(tf.round(resized), 0, 255), tf.uint8)
+    return resized.numpy()
+
+
+def warmup_client_image_resize() -> None:
+    """Pay TensorFlow import/kernel setup before the first synchronous request."""
+
+    resize_image_for_policy(np.zeros((480, 640, 3), dtype=np.uint8))
+
+
+def encode_png_bytes(image: np.ndarray) -> bytes:
+    array = _validate_rgb_image(image)
     buffer = io.BytesIO()
     Image.fromarray(array, mode="RGB").save(buffer, format="PNG", compress_level=1)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    return buffer.getvalue()
+
+
+def encode_png(image: np.ndarray) -> str:
+    return base64.b64encode(encode_png_bytes(image)).decode("ascii")
 
 
 def decode_png(encoded: str) -> np.ndarray:
@@ -175,13 +234,39 @@ def observation_to_request(
     request_id: str,
     action_keys: tuple[str, ...] = ACTION_KEYS,
     image_keys: tuple[str, ...] = IMAGE_KEYS,
+    resize_images: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     state = [float(observation[key]) for key in action_keys]
+    encoded_images: dict[str, str] = {}
+    resize_ms = 0.0
+    image_encode_ms = 0.0
+    base64_ms = 0.0
+    for key in image_keys:
+        image = _validate_rgb_image(np.asarray(observation[key]))
+        if resize_images:
+            started = time.perf_counter()
+            image = resize_image_for_policy(image, MODEL_IMAGE_SIZE)
+            resize_ms += (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
+        png = encode_png_bytes(image)
+        image_encode_ms += (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
+        encoded_images[key] = base64.b64encode(png).decode("ascii")
+        base64_ms += (time.perf_counter() - started) * 1000.0
+    if timings is not None:
+        timings.update(
+            {
+                "client_resize_ms": resize_ms,
+                "client_image_encode_ms": image_encode_ms,
+                "client_base64_ms": base64_ms,
+            }
+        )
     return {
         "request_id": request_id,
         "task": task,
         "state": state,
-        "images": {key: encode_png(np.asarray(observation[key])) for key in image_keys},
+        "images": encoded_images,
     }
 
 
@@ -189,6 +274,7 @@ def request_to_observation(
     request: dict[str, Any],
     action_dim: int = ACTION_DIM,
     image_keys: tuple[str, ...] = IMAGE_KEYS,
+    timings: dict[str, float] | None = None,
 ) -> tuple[dict[str, Any], str, str]:
     request_id = str(request.get("request_id", ""))
     task = request.get("task")
@@ -210,9 +296,10 @@ def request_to_observation(
     observation = {
         "state": state,
     }
-    observation.update(
-        {transport_names[key]: decode_png(images[key]) for key in image_keys}
-    )
+    started = time.perf_counter()
+    observation.update({transport_names[key]: decode_png(images[key]) for key in image_keys})
+    if timings is not None:
+        timings["server_image_decode_ms"] = (time.perf_counter() - started) * 1000.0
     return observation, task.strip(), request_id
 
 

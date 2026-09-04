@@ -70,6 +70,7 @@ commands:
   plan          resolve launch settings without server, ROS, or GPU access
   model-server  merge LoRA and start the synchronous FastAPI model server
   probe          run one ROS-free image-pair request against FastAPI
+  benchmark      benchmark 50 synchronous requests before/after official 224 resize
   dry-run       sync inference; read observations, never publish robot actions
   run-robot     sync inference with the three-part physical safety gate
   smoke         run CPU-only synthetic contract tests
@@ -126,6 +127,12 @@ case "${command}" in
     cd "${project_root}"
     exec "$(runtime_python)" scripts/probe_fastapi_inference.py "$@"
     ;;
+  benchmark)
+    cd "${project_root}"
+    exec env CUDA_VISIBLE_DEVICES='' TF_CPP_MIN_LOG_LEVEL=3 \
+      MPLCONFIGDIR="${project_root}/.runtime/matplotlib" \
+      "$(rlds_python)" scripts/benchmark_sync_pipeline.py "$@"
+    ;;
   dry-run)
     exec "${project_root}/tools/run_piper_openvla_runtime.sh" sync "$@" --mode dry-run
     ;;
@@ -141,6 +148,10 @@ case "${command}" in
       "${test_python}" tests/rlds_converter_smoke.py
     env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
       "${test_python}" tests/yaml_config_smoke.py
+    env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 TF_CPP_MIN_LOG_LEVEL=3 \
+      HF_HOME="${project_root}/.runtime/huggingface" \
+      TRANSFORMERS_CACHE="${project_root}/.runtime/huggingface/transformers" \
+      "${test_python}" tests/client_resize_smoke.py
     exec env CUDA_VISIBLE_DEVICES='' PYTHONDONTWRITEBYTECODE=1 \
       "${test_python}" tests/fastapi_server_smoke.py
     ;;

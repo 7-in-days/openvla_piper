@@ -196,6 +196,25 @@ fi
 
 test -x "${robot_python}"
 
+# The official OpenVLA-OFT client resize uses TensorFlow's RLDS pipeline. The
+# RLDS tools venv is an overlay of the selected LeRobot environment, so it keeps
+# the same Piper bridge while adding TensorFlow without mutating that env.
+client_python="${robot_python}"
+if [[ -z "${lerobot_prefix_override}" ]]; then
+  rlds_prefix="${RLDS_TOOLS_PREFIX:-}"
+  if [[ -z "${rlds_prefix}" && -r "${project_root}/.rlds-tools-prefix" ]]; then
+    IFS= read -r rlds_prefix <"${project_root}/.rlds-tools-prefix"
+  fi
+  if [[ -n "${rlds_prefix}" && -x "${rlds_prefix}/bin/python" ]]; then
+    client_python="${rlds_prefix}/bin/python"
+  fi
+fi
+if ! "${client_python}" -c 'import tensorflow' >/dev/null 2>&1; then
+  printf '%s\n' \
+    'error=client_resize_dependency_missing hint=run_scripts/openvla-pipeline_install-rlds' >&2
+  exit 1
+fi
+
 server_started_here=0
 server_pid=""
 health_json=""
@@ -269,4 +288,5 @@ else
   runtime_module="openvla_async_pipeline"
 fi
 env -u PYTHONPATH -u AMENT_PREFIX_PATH -u COLCON_PREFIX_PATH \
-  "${robot_python}" -m "${runtime_module}" deploy "${forward_args[@]}"
+  TF_CPP_MIN_LOG_LEVEL=3 MPLCONFIGDIR="${project_root}/.runtime/matplotlib" \
+  "${client_python}" -m "${runtime_module}" deploy "${forward_args[@]}"

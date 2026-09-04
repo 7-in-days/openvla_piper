@@ -17,8 +17,9 @@ from openvla_pipeline.model_io import (
     LIVE_CONFIRMATION,
     observation_to_request,
     validate_action_chunk,
+    warmup_client_image_resize,
 )
-from openvla_pipeline.piper_dry_run import request_json
+from openvla_pipeline.piper_dry_run import request_json, request_json_with_timings
 from openvla_async_pipeline.async_chunk_prefetcher import AsyncChunkPrefetcher, PreparedChunk
 from openvla_pipeline.config import load_runtime_config
 from openvla_pipeline.chunk_topics import ActionChunkTopicPublisher, action_frame_id
@@ -186,6 +187,7 @@ class PiperOpenVLAPipeline:
             self.piper_bridge_config,
         )
         self.gripper_index = self.piper_model_contract.action_keys.index("gripper.pos")
+        warmup_client_image_resize()
 
         self.runtime_description = json.loads(
             self.piper_model_contract.describe(
@@ -326,6 +328,8 @@ class PiperOpenVLAPipeline:
             self._run_one_chunk(chunk)
 
     def _infer_one_chunk(self, sequence: int) -> dict:
+        total_started = time.perf_counter()
+        acquire_started = time.perf_counter()
         observation_stream_status = self.piper_robot.get_stream_status()
         if not observation_stream_status.get("ready"):
             raise RuntimeError(
@@ -339,6 +343,9 @@ class PiperOpenVLAPipeline:
             observation = self.piper_robot.get_observation()
         else:
             observation, observation_packet = packet_getter()
+        client_timings: dict[str, float | int] = {
+            "observation_acquire_ms": (time.perf_counter() - acquire_started) * 1000.0
+        }
         state = np.asarray(
             [observation[key] for key in self.piper_model_contract.action_keys],
             dtype=np.float32,
@@ -358,19 +365,25 @@ class PiperOpenVLAPipeline:
             request_id,
             action_keys=self.piper_model_contract.action_keys,
             image_keys=self.piper_model_contract.camera_names,
+            resize_images=True,
+            timings=client_timings,
         )
         request_stamp_ns = time.time_ns()
         try:
-            response = request_json(
+            response, transport_timings = request_json_with_timings(
                 f"{self.server}/act",
                 request,
                 self.token,
                 timeout=self.config.request_timeout_s,
             )
+            client_timings.update(transport_timings)
         except Exception as exc:
             self._record_failure(sequence, request_id, "send_failed", exc, request_stamp_ns)
             raise
         response_received_stamp_ns = time.time_ns()
+        client_timings["total_client_wall_ms"] = (
+            time.perf_counter() - total_started
+        ) * 1000.0
         if response.get("request_id") != request_id:
             error = RuntimeError("OpenVLA response request_id가 요청과 다름")
             self._record_failure(
@@ -385,6 +398,10 @@ class PiperOpenVLAPipeline:
             "request_stamp_ns": request_stamp_ns,
             "response_received_stamp_ns": response_received_stamp_ns,
             "observation_packet": observation_packet,
+            "timings": {
+                **client_timings,
+                **dict(response.get("timings", {})),
+            },
             "response": {
                 "action_shape": response.get("action_shape"),
                 "normalization": response.get("normalization"),
@@ -457,6 +474,7 @@ class PiperOpenVLAPipeline:
                 publish_stamp_ns=original_stamp_ns,
             )
         response_metadata = dict(request_log.get("response", {}))
+        request_timings = dict(request_log.get("timings", {}))
         observation_packet = dict(request_log["observation_packet"])
         self.inference_logger.append_observability(
             {
@@ -478,6 +496,7 @@ class PiperOpenVLAPipeline:
                 "client_inference_wall_ms": float(chunk.inference_wall_ms),
                 "action_shape": list(actions.shape),
                 "mode": "live" if self.motion_enabled else "dry-run",
+                "timings": request_timings,
                 **response_metadata,
             }
         )

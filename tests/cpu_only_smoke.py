@@ -330,12 +330,19 @@ def main() -> None:
             },
         }
         runtime = PiperModelContract.from_runtime(health, robot_config)
+        assert runtime.action_shape == (20, 7)
+        assert runtime.control_interval_s == 0.05
+        assert runtime.chunk_duration_s == 1.0
         described = json.loads(
             runtime.describe("/piper/synced/frame", "/piper/inference/output")
         )
         assert described["input_topic"] == "/piper/synced/frame"
         assert described["output_topic"] == "/piper/inference/output"
         validate_execution_mode(False, False, None, False)
+        expect_error(
+            ContractError,
+            lambda: validate_execution_mode(True, True, "YES", True),
+        )
         expect_error(
             ContractError,
             lambda: validate_execution_mode(True, False, "YES", False),
@@ -346,6 +353,8 @@ def main() -> None:
         )
         assert "if self.motion_enabled:" in pipeline_source
         assert "self.piper_robot.send_action(robot_action)" in pipeline_source
+        assert "time.sleep(" in pipeline_source
+        assert "self.piper_model_contract.control_interval_s - elapsed" in pipeline_source
 
         for name, maximum in {
             "OMP_NUM_THREADS": 8,

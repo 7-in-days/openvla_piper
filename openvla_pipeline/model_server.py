@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,40 @@ class RequestSizeLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+class RequestTimingMiddleware:
+    """Expose request parsing and response rendering boundaries without profiling."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/act":
+            await self.app(scope, receive, send)
+            return
+
+        state = scope.setdefault("state", {})
+
+        async def timed_receive() -> dict[str, Any]:
+            message = await receive()
+            if message.get("type") == "http.request" and not message.get("more_body", False):
+                state["request_body_received_ns"] = time.perf_counter_ns()
+            return message
+
+        async def timed_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                started_ns = state.get("response_serialize_started_ns")
+                if started_ns is not None:
+                    duration_ms = (time.perf_counter_ns() - int(started_ns)) / 1_000_000.0
+                    headers = list(message.get("headers", ()))
+                    headers.append(
+                        (b"server-timing", f"response_serialize;dur={duration_ms:.6f}".encode("ascii"))
+                    )
+                    message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, timed_receive, timed_send)
+
+
 def create_app(
     policy: PiperOpenVLAPolicy,
     *,
@@ -87,6 +122,7 @@ def create_app(
     app.add_middleware(
         RequestSizeLimitMiddleware, max_request_bytes=max_request_bytes
     )
+    app.add_middleware(RequestTimingMiddleware)
 
     @app.exception_handler(HTTPException)
     async def http_error(_request: Request, exc: HTTPException) -> JSONResponse:
@@ -111,21 +147,31 @@ def create_app(
 
     @app.post("/act", response_model=None)
     async def act(
+        request: Request,
         payload: ActionRequest,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
+        endpoint_started_ns = time.perf_counter_ns()
         if app.state.auth_token and authorization != f"Bearer {app.state.auth_token}":
             raise HTTPException(status_code=401, detail="invalid bearer token")
 
+        server_timings: dict[str, float] = {}
+        body_received_ns = getattr(request.state, "request_body_received_ns", None)
+        if body_received_ns is not None:
+            server_timings["server_request_parse_ms"] = (
+                endpoint_started_ns - int(body_received_ns)
+            ) / 1_000_000.0
         try:
             observation, task, request_id = request_to_observation(
                 payload.model_dump(),
                 action_dim=app.state.policy.action_dim,
                 image_keys=app.state.policy.image_keys,
+                timings=server_timings,
             )
             # OpenVLA-OFT inference is intentionally synchronous. Uvicorn runs
             # one worker and PiperOpenVLAPolicy serializes CUDA access.
             result = app.state.policy.predict(observation, task)
+            server_timings.update(result.pop("server_timings", {}))
         except ContractError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -133,7 +179,9 @@ def create_app(
                 status_code=500,
                 detail=f"{type(exc).__name__}: {exc}",
             ) from exc
-        return {"request_id": request_id, **result}
+        response = {"request_id": request_id, **result, "timings": server_timings}
+        request.state.response_serialize_started_ns = time.perf_counter_ns()
+        return response
 
     return app
 

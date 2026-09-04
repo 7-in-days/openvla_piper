@@ -19,28 +19,71 @@ from openvla_pipeline.model_io import (
     ContractError,
     observation_to_request,
     validate_action_chunk,
+    warmup_client_image_resize,
 )
 from openvla_pipeline.cli import Option, parse_options, selected_option, usage_error
 from openvla_pipeline.config import load_runtime_config
 from openvla_pipeline.piper_runtime import PiperModelContract
 
 
-def request_json(url: str, payload: dict[str, Any] | None, token: str | None, timeout: float) -> dict[str, Any]:
+def _server_timing_ms(header: str | None, metric: str) -> float | None:
+    if not header:
+        return None
+    for item in header.split(","):
+        fields = [field.strip() for field in item.split(";")]
+        if fields[0] != metric:
+            continue
+        for field in fields[1:]:
+            if field.startswith("dur="):
+                try:
+                    return float(field.removeprefix("dur="))
+                except ValueError:
+                    return None
+    return None
+
+
+def request_json_with_timings(
+    url: str,
+    payload: dict[str, Any] | None,
+    token: str | None,
+    timeout: float,
+) -> tuple[dict[str, Any], dict[str, float | int]]:
+    serialize_started = time.perf_counter()
     body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    serialize_ms = (time.perf_counter() - serialize_started) * 1000.0 if body is not None else 0.0
     headers = {"Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, data=body, headers=headers, method="GET" if body is None else "POST")
+    roundtrip_started = time.perf_counter()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            result = json.loads(response.read())
+            response_body = response.read()
+            response_serialize_ms = _server_timing_ms(
+                response.headers.get("Server-Timing"), "response_serialize"
+            )
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"policy server HTTP {exc.code}: {detail}") from exc
+    roundtrip_ms = (time.perf_counter() - roundtrip_started) * 1000.0
+    result = json.loads(response_body)
     if "error" in result:
         raise RuntimeError(f"policy server error: {result['error']}")
+    timings: dict[str, float | int] = {
+        "client_json_serialize_ms": serialize_ms,
+        "http_roundtrip_ms": roundtrip_ms,
+        "request_bytes": 0 if body is None else len(body),
+        "response_bytes": len(response_body),
+    }
+    if response_serialize_ms is not None:
+        timings["server_response_serialize_ms"] = response_serialize_ms
+    return result, timings
+
+
+def request_json(url: str, payload: dict[str, Any] | None, token: str | None, timeout: float) -> dict[str, Any]:
+    result, _timings = request_json_with_timings(url, payload, token, timeout)
     return result
 
 
@@ -102,6 +145,7 @@ def main() -> None:
         model_server_status,
         robot_config,
     )
+    warmup_client_image_resize()
     piper_robot = PiperBridgeRobot(robot_config)
     sent = 0
     try:

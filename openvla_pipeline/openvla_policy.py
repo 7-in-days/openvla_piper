@@ -355,7 +355,10 @@ class PiperOpenVLAPolicy:
         from peft import PeftModel
         from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
-        from experiments.robot.openvla_utils import get_vla_action
+        from experiments.robot.openvla_utils import (
+            normalize_proprio,
+            prepare_images_for_vla,
+        )
         from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
         from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
         from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
@@ -435,7 +438,8 @@ class PiperOpenVLAPolicy:
         self._processor = processor
         self._action_head = action_head
         self._proprio_projector = proprio_projector
-        self._get_vla_action = get_vla_action
+        self._normalize_proprio = normalize_proprio
+        self._prepare_images_for_vla = prepare_images_for_vla
         self._cfg = SimpleNamespace(
             use_l1_regression=True,
             use_diffusion=False,
@@ -458,19 +462,56 @@ class PiperOpenVLAPolicy:
 
     def predict(self, observation: dict[str, Any], task: str) -> dict[str, Any]:
         state = np.asarray(observation["state"], dtype=np.float32).copy()
-        model_observation = self._prepare_observation(observation)
         started = time.perf_counter()
         with self._lock:
-            actions = self._get_vla_action(
-                self._cfg,
-                self._vla,
-                self._processor,
-                model_observation,
-                task,
-                self._action_head,
-                self._proprio_projector,
-            )
+            preprocess_started = time.perf_counter()
+            model_observation = self._prepare_observation(observation)
+            with self._torch.inference_mode():
+                all_images = [model_observation["full_image"]]
+                if self._cfg.num_images_in_input > 1:
+                    all_images.extend(
+                        model_observation[key]
+                        for key in model_observation
+                        if "wrist" in key
+                    )
+                all_images = self._prepare_images_for_vla(all_images, self._cfg)
+                primary_image = all_images.pop(0)
+                prompt = f"In: What action should the robot take to {task.lower()}?\nOut:"
+                inputs = self._processor(prompt, primary_image).to(
+                    self._device, dtype=self._torch.bfloat16
+                )
+                if all_images:
+                    wrist_inputs = [
+                        self._processor(prompt, image).to(
+                            self._device, dtype=self._torch.bfloat16
+                        )
+                        for image in all_images
+                    ]
+                    inputs["pixel_values"] = self._torch.cat(
+                        [inputs["pixel_values"]]
+                        + [item["pixel_values"] for item in wrist_inputs],
+                        dim=1,
+                    )
+                proprio = self._normalize_proprio(
+                    model_observation["state"],
+                    self._vla.norm_stats[self._cfg.unnorm_key]["proprio"],
+                )
+                preprocess_ms = (time.perf_counter() - preprocess_started) * 1000.0
+
+                forward_started = time.perf_counter()
+                action, _ = self._vla.predict_action(
+                    **inputs,
+                    unnorm_key=self._cfg.unnorm_key,
+                    do_sample=False,
+                    proprio=proprio,
+                    proprio_projector=self._proprio_projector,
+                    noisy_action_projector=None,
+                    action_head=self._action_head,
+                    use_film=self._cfg.use_film,
+                )
+                actions = [action[index] for index in range(len(action))]
             self._torch.cuda.synchronize(self._device)
+            model_forward_ms = (time.perf_counter() - forward_started) * 1000.0
         guarded, clipped = self.action_safety.apply(actions, state)
         return {
             "actions": guarded.tolist(),
@@ -481,6 +522,10 @@ class PiperOpenVLAPolicy:
             "clipped_to_training_q01_q99": clipped if self.normalization == "bounds_q99" else False,
             "inference_ms": (time.perf_counter() - started) * 1000.0,
             "peak_vram_mib": self._torch.cuda.max_memory_allocated(self._device) / 1024**2,
+            "server_timings": {
+                "server_preprocess_ms": preprocess_ms,
+                "model_forward_ms": model_forward_ms,
+            },
         }
 
     def health(self) -> dict[str, Any]:

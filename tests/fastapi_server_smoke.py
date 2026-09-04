@@ -27,8 +27,8 @@ class FakeMergedPolicy:
 
     def predict(self, observation, task):
         assert observation["state"].shape == (7,)
-        assert observation["full_image"].shape == (2, 2, 3)
-        assert observation["wrist_image"].shape == (2, 2, 3)
+        assert observation["full_image"].shape == (224, 224, 3)
+        assert observation["wrist_image"].shape == (224, 224, 3)
         assert task == "two block pnp"
         return {
             "actions": np.zeros((20, 7), dtype=np.float32).tolist(),
@@ -106,7 +106,7 @@ async def smoke() -> None:
     assert status == 200
     assert set(openapi["paths"]) >= {"/health", "/act"}
 
-    image = encode_png(np.zeros((2, 2, 3), dtype=np.uint8))
+    image = encode_png(np.zeros((224, 224, 3), dtype=np.uint8))
     payload = {
         "request_id": "request-1",
         "task": "two block pnp",
@@ -127,6 +127,8 @@ async def smoke() -> None:
     assert status == 200
     assert response["request_id"] == "request-1"
     assert response["action_shape"] == [20, 7]
+    assert response["timings"]["server_request_parse_ms"] >= 0.0
+    assert response["timings"]["server_image_decode_ms"] >= 0.0
 
     invalid = {**payload, "state": [0.0] * 6}
     status, response = await asgi_request(
